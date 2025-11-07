@@ -51,11 +51,11 @@ jobs:
       - name: Sanity check JSON
         run: |
           python - <<'PY'
-import json, os
-p = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-json.load(open(p))
-print("Service account JSON OK at:", p)
-PY
+          import json, os
+          p = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+          json.load(open(p))
+          print("Service account JSON OK at:", p)
+          PY
 
       - name: Run consolidate
         run: |
