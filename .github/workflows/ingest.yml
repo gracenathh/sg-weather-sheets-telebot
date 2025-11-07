@@ -58,6 +58,24 @@ jobs:
           print("Service account JSON OK at:", p)
           PY
 
+      - name: Diagnostic: check rainfall API
+        run: |
+          python - <<'PY'
+          import os, requests, json
+          H = {"X-Api-Key": os.environ.get("DATA_GOV_SG_API_KEY",""), "User-Agent": "gha-preflight/1.0"}
+          url = "https://api-open.data.gov.sg/v2/real-time/api/rainfall"
+          r = requests.get(url, headers=H, timeout=20)
+          print("HTTP:", r.status_code)
+          J = r.json()
+          print("top-level keys:", list(J.keys()))
+          print("errorMsg:", J.get("errorMsg"))
+          D = J.get("data") or {}
+          recs = D.get("records") or D.get("readings") or []
+          print("records len:", len(recs) if isinstance(recs, list) else f"type={type(recs).__name__}")
+          if isinstance(recs, list) and recs[:1]:
+            print("sample:", json.dumps(recs[0], default=str)[:300])
+          PY
+
       - name: Run consolidate
         run: |
           python consolidate.py
