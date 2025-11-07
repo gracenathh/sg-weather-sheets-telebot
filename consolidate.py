@@ -184,9 +184,24 @@ def run_rainfall(sh, date_str = None):
         rainfall_url = f"https://api-open.data.gov.sg/v2/real-time/api/rainfall?date={date_str}"
     else:
         rainfall_url = f"https://api-open.data.gov.sg/v2/real-time/api/rainfall"
+        
+    print("[rainfall] fetching…")
+    raw = fetch_data(rainfall_url, raw = True)
+    print("[rainfall] errorMsg:", raw.get("errorMsg"))
+    data = raw.get("data") or {}
+    recs = data.get("records") or data.get("readings") or []
+    print("[rainfall] records len:", len(recs) if isinstance(recs, list) else "not a list")
+
     rainfall_json_data = fetch_data(rainfall_url)
     rainfall_value, rainfall_area = rainfall_data_reading(rainfall_json_data)
 
+    print(f"[rainfall] parsed rows → values:{len(rainfall_value or [])}, stations:{len(rainfall_area or [])}")
+
+    if rainfall_value:
+        print(f"[rainfall] wrote {len(rainfall_value)} rows")
+    else:
+        print("[rainfall] nothing to write")
+        
     rainfall_value_ws_frame = ensure_worksheet(sh, "rainfall_data", ["station_id","station_name","lat","lon","reading_value","reading_time"])
     append_unique(rainfall_value_ws_frame,rainfall_value,key_cols=["station_id","reading_time"])
 
