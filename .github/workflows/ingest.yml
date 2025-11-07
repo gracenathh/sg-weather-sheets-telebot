@@ -1,0 +1,66 @@
+name: sg-weather-sheets-telebot (ingest)
+
+on:
+  # manual run button in GitHub → Actions
+  workflow_dispatch: {}
+  # schedule (GitHub cron is UTC). This runs at 00:05, 06:05, 12:05, 18:05 SGT.
+  schedule:
+    - cron: "5 16,22,4,10 * * *"
+
+# prevent overlapping runs
+concurrency:
+  group: weather-prod
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    # expose secrets as env vars your script reads
+    env:
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+      # we'll write SA_JSON into this path at runtime:
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # If you stored pretty JSON in SA_JSON (recommended)
+      - name: Write service account JSON
+        run: |
+          echo '${{ secrets.SA_JSON }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      # (Optional) If you instead stored base64 as SA_JSON_B64, use this block instead:
+      # - name: Write service account JSON (base64)
+      #   run: |
+      #     echo '${{ secrets.SA_JSON_B64 }}' | base64 -d > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Sanity check JSON
+        run: |
+          python - <<'PY'
+import json, os
+p = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+json.load(open(p))
+print("Service account JSON OK at:", p)
+PY
+
+      - name: Run consolidate
+        run: |
+          python consolidate.py
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
