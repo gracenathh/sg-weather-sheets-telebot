@@ -37,6 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install python-dotenv
 
       # If you stored pretty JSON in SA_JSON (recommended)
       - name: Write service account JSON
