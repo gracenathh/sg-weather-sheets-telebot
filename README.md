@@ -22,5 +22,5 @@ You can schedule this to run continuously on **GitHub Actions**, even when your 
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/<your-username>/sg-weather-sheets-telebot.git
+git clone https://github.com/gracenathh/sg-weather-sheets-telebot.git
 cd sg-weather-sheets-telebot
