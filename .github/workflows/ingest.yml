@@ -58,7 +58,7 @@ jobs:
           print("Service account JSON OK at:", p)
           PY
 
-      - name: Diagnostic: check rainfall API
+      - name: Diagnostic - check rainfall API
         run: |
           python - <<'PY'
           import os, requests, json
