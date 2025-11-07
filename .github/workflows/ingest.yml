@@ -3,9 +3,10 @@ name: sg-weather-sheets-telebot (ingest)
 on:
   # manual run button in GitHub → Actions
   workflow_dispatch: {}
-  # schedule (GitHub cron is UTC). This runs at 00:05, 06:05, 12:05, 18:05 SGT.
+  # schedule (GitHub cron is UTC). This runs at 00:05, 06:05, 12:05, 18:05 SGT. "5 16,22,4,10 * * *"
+  # alternatively, run every 5th-mins of every hour
   schedule:
-    - cron: "5 16,22,4,10 * * *"
+    - cron: "5 * * * *"
 
 # prevent overlapping runs
 concurrency:
