@@ -188,8 +188,8 @@ def run_rainfall(sh, date_str = None):
     rainfall_json_data = fetch_data(rainfall_url)
     rainfall_value, rainfall_area = rainfall_data_reading(rainfall_json_data)
         
-    rainfall_value_ws_frame = ensure_worksheet(sh, "rainfall_data", ["station_id","station_name","lat","lon","reading_value","reading_time"])
-    append_unique(rainfall_value_ws_frame,rainfall_value,key_cols=["station_id","reading_time"])
+    # rainfall_value_ws_frame = ensure_worksheet(sh, "rainfall_data", ["station_id","station_name","lat","lon","reading_value","reading_time"])
+    # append_unique(rainfall_value_ws_frame,rainfall_value,key_cols=["station_id","reading_time"])
 
     rainfall_station_ws_frame = ensure_worksheet(sh, "stations", ["station_id","station_name","lat","lon"])
 
@@ -382,11 +382,12 @@ if __name__ == "__main__":
 
     run_mets(sh, rainfall_area)
 
+    tdy_date_str = dt.datetime.now(SGT).date().isoformat()
     ytd_date = dt.datetime.now(SGT).date() - dt.timedelta(days=1)
     ytd_date_str = ytd_date.isoformat()
 
     start_date = ytd_date_str
-    end_date = ytd_date_str
+    end_date = tdy_date_str
 
     for n, d in enumerate(iter_dates_inclusive(start_date, end_date), start=1):
         
