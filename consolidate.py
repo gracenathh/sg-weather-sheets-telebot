@@ -1,4 +1,4 @@
-import os, requests
+import os, requests, io, csv, math, time
 import datetime as dt
 from sheets_utils import open_sheet, ensure_worksheet
 from typing import List, Dict, Tuple
@@ -6,14 +6,17 @@ import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 from datetime import date, timedelta
-from collections import defaultdict
-import math
-import time
+from collections import defaultdict, Counter
+from shapely import wkt
+from shapely.geometry import Point
+import pandas as pd
+import numpy as np
+from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 
 SGT = dt.timezone(dt.timedelta(hours=8))
-# BASE = os.getenv("DGS_REALTIME_BASE", "https://api-open.data.gov.sg/v2/real-time/api")
 UA = os.getenv("USER_AGENT", "sg-weather-collector/1.0")
 API_KEY = os.getenv("DATA_GOV_SG_API_KEY")
 SHEET_ID = os.environ["SHEET_ID"]
@@ -144,8 +147,8 @@ def rainfall_data_reading(raw_data):
         d = (raw_data or {}).get("data", {}) or {}
 
     stations_list = d.get("stations", []) or []
-    # reading_type  = "rainfall"
-    buckets       = d.get("readings", []) or []
+    buckets = d.get("readings", []) or []
+    paginationToken = d.get("paginationToken", []) or None
 
     # index stations
     sid_to_meta = {}
@@ -173,7 +176,7 @@ def rainfall_data_reading(raw_data):
             obs_rows.append([meta[0], meta[1], meta[2], meta[3], val, ts])
             st_rows_map[sid] = meta
 
-    return obs_rows, list(st_rows_map.values())
+    return obs_rows, list(st_rows_map.values()), paginationToken
 
 def run_rainfall(sh, date_str = None):
     """
@@ -186,11 +189,29 @@ def run_rainfall(sh, date_str = None):
         rainfall_url = f"https://api-open.data.gov.sg/v2/real-time/api/rainfall"
 
     rainfall_json_data = fetch_data(rainfall_url)
-    rainfall_value, rainfall_area = rainfall_data_reading(rainfall_json_data)
+    rainfall_value, rainfall_area, rainfall_page = rainfall_data_reading(rainfall_json_data)
+
+    rainfall_next_value = None
+    rainfall_next_area = None
+
+    while rainfall_page != None:
+        new_url = f"https://api-open.data.gov.sg/v2/real-time/api/rainfall?date={date_str}&paginationToken={rainfall_page}"
+
+        next_page_json_data = fetch_data(new_url)
+        rainfall_next_value, rainfall_next_area, rainfall_next_page = rainfall_data_reading(next_page_json_data)
+        for item in rainfall_next_value:
+            rainfall_value.append(item)
+        
+        for area in rainfall_next_area:
+            rainfall_area.append(area)
+
+        rainfall_page = rainfall_next_page
+
         
     # rainfall_value_ws_frame = ensure_worksheet(sh, "rainfall_data", ["station_id","station_name","lat","lon","reading_value","reading_time"])
     # append_unique(rainfall_value_ws_frame,rainfall_value,key_cols=["station_id","reading_time"])
 
+    """
     rainfall_station_ws_frame = ensure_worksheet(sh, "stations", ["station_id","station_name","lat","lon"])
 
     if rainfall_area:
@@ -198,59 +219,117 @@ def run_rainfall(sh, date_str = None):
         rainfall_station_ws_frame.clear()
         rainfall_station_ws_frame.append_row(["station_id","station_name","lat","lon"])
         rainfall_station_ws_frame.append_rows(rainfall_area, value_input_option="USER_ENTERED")
+    """
 
     return rainfall_value, rainfall_area
 
+def parse_mets_page(data_dict):
+    """
+    data_dict is what fetch_data(...) returns (already the 'data' object).
+    Returns: (rows, next_token) where rows = [(timestamp, station_id, value), ...]
+    """
+    d = data_dict or {}
+    buckets = d.get("readings") or []
+    token = d.get("paginationToken") or None
 
-def normalise_mets_data_reading(readings):
     rows = []
-    
-    for bucket in readings or []:
+    for bucket in buckets:
         ts = bucket.get("timestamp")
-        for d in (bucket.get("data") or []):
-            sid = d.get("stationId"); val = d.get("value")
+        for drow in (bucket.get("data") or []):
+            sid = drow.get("stationId")
+            val = drow.get("value")
             if ts and sid is not None and val is not None:
                 rows.append((ts, str(sid), float(val)))
-    return rows
+    return rows, token
 
-def run_mets(sh, rainfall_area, date_str = None):
+def fetch_all_mets_rows(base_url, date_str=None):
     """
-    Uses v2 METS, writes to 'mets_data' with your headers.
-    Requires rainfall_area to build station_name_map.
+    Loops over pagination for a single METS endpoint (e.g., temperature).
+    Returns a de-duplicated list of (timestamp, station_id, value).
     """
-    # METS DATA
+    output_row = []
+
     if date_str != None:
-        date_param = {"date": date_str}
+        mets_url = f"{base_url}?date={date_str}"
     else:
-        date_param = None
+        mets_url = f"{base_url}"
+    
+    json_data = fetch_data(mets_url)
+    row_value, paginationToken = parse_mets_page(json_data)
 
-    temperature_url = "https://api-open.data.gov.sg/v2/real-time/api/air-temperature"
-    temperature_json_data = fetch_data(temperature_url, params = date_param)
-    temperature_data = normalise_mets_data_reading(temperature_json_data.get("readings"))
+    seen = set()
+    for ts, sid, val in row_value:
+        key = (ts, sid)
+        if key not in seen:
+            seen.add(key)
+            output_row.append((ts, sid, val))
 
-    humidity_url = "https://api-open.data.gov.sg/v2/real-time/api/relative-humidity"
-    humidity_json_data = fetch_data(humidity_url, params = date_param)
-    humidity_data = normalise_mets_data_reading(humidity_json_data.get("readings"))
+    next_value = None
+    next_page = None
 
-    wind_dir_url = "https://api-open.data.gov.sg/v2/real-time/api/wind-direction"
-    wind_dir_json_data = fetch_data(wind_dir_url, params = date_param)
-    wind_dir_data = normalise_mets_data_reading(wind_dir_json_data.get("readings"))
+    while paginationToken != None:
+        
+        new_url = f"{base_url}?date={date_str}&paginationToken={paginationToken}"
+        next_json_data = fetch_data(new_url)
+        next_value, next_page = parse_mets_page(next_json_data)
 
-    wind_speed_url = "https://api-open.data.gov.sg/v2/real-time/api/wind-speed"
-    wind_speed_json_data = fetch_data(wind_speed_url, params = date_param)
-    wind_speed_data = normalise_mets_data_reading(wind_speed_json_data.get("readings"))
+        for ts, sid, val in next_value:
+            key = (ts, sid)
+            if key not in seen:
+                seen.add(key)
+                output_row.append((ts, sid, val))
 
-    tmap = {(ts, sid): val for ts, sid, val in temperature_data}
-    hmap = {(ts, sid): val for ts, sid, val in humidity_data}
-    spm  = {(ts, sid): val for ts, sid, val in wind_speed_data}  # speed (m/s)
-    dgm  = {(ts, sid): val for ts, sid, val in wind_dir_data}    # dir (deg)
-    keys = sorted(set(tmap) | set(hmap) | set(spm) | set(dgm))
+        paginationToken = next_page
 
-    station_name_map = {item[0]: item[1] for item in rainfall_area if len(item) >= 2}
+    return output_row
+
+def run_mets(sh, rainfall_area, date_str=None, write_to_sheet=True):
+    """
+    Uses v2 METS endpoints, paginates through the whole day, joins into rows:
+    [timestamp, station_id, station_name, temp_c, rh_pct, wind_ms, wind_dir_deg]
+    """
+
+    urls = {
+        "temp":"https://api-open.data.gov.sg/v2/real-time/api/air-temperature",
+        "humidity":"https://api-open.data.gov.sg/v2/real-time/api/relative-humidity",
+        "wind_dir":"https://api-open.data.gov.sg/v2/real-time/api/wind-direction",
+        "wind_speed":"https://api-open.data.gov.sg/v2/real-time/api/wind-speed"
+    }
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {k: ex.submit(fetch_all_mets_rows, u, date_str) for k, u in urls.items()}
+        temperature_rows = futs["temp"].result()
+        humidity_rows    = futs["humidity"].result()
+        wind_dir_rows    = futs["wind_dir"].result()
+        wind_speed_rows  = futs["wind_speed"].result()
+    """
+    # Pull all pages for each metric
+    temperature_rows = fetch_all_mets_rows("https://api-open.data.gov.sg/v2/real-time/api/air-temperature", date_str)
+    print("3A. Pulled Temperature")
+    humidity_rows = fetch_all_mets_rows("https://api-open.data.gov.sg/v2/real-time/api/relative-humidity", date_str)
+    print("3B. Pulled Humidity")
+    wind_dir_rows = fetch_all_mets_rows("https://api-open.data.gov.sg/v2/real-time/api/wind-direction", date_str)
+    print("3C. Pulled Wind Dir")
+    wind_speed_rows = fetch_all_mets_rows("https://api-open.data.gov.sg/v2/real-time/api/wind-speed", date_str)
+    print("3D. Pulled Wind Speed")
+    """
+
+    # Build lookup maps
+    tmap = {(ts, sid): val for ts, sid, val in temperature_rows}
+    hmap = {(ts, sid): val for ts, sid, val in humidity_rows}
+    spm  = {(ts, sid): val for ts, sid, val in wind_speed_rows}   # speed (m/s)
+    dgm  = {(ts, sid): val for ts, sid, val in wind_dir_rows}     # direction (deg)
+
+    # Union of all keys across the four metrics
+    keys = sorted(set().union(tmap.keys(), hmap.keys(), spm.keys(), dgm.keys()))
+
+    # Station name map from rainfall_area
+    station_name_map = {str(item[0]): (item[1] if len(item) > 1 else "") for item in (rainfall_area or [])}
+
+    # Assemble final rows
     mets_data = []
-
     for ts, sid in keys:
-        name = (station_name_map or {}).get(sid, "")
+        name = station_name_map.get(sid, "")
         temp = tmap.get((ts, sid))
         hum  = hmap.get((ts, sid))
         spd  = spm.get((ts, sid))
@@ -265,13 +344,17 @@ def run_mets(sh, rainfall_area, date_str = None):
             "" if deg  is None else deg,
         ])
 
-    mets_headers = ["timestamp","station_id","station_name","temp_value_celcius", "humidity_value_percentage","wind_speed_ms","wind_dir_deg"]
-    mets_value_ws_frame = ensure_worksheet(sh, "mets_data", mets_headers)
-    append_unique(mets_value_ws_frame, mets_data, key_cols=["timestamp", "station_id"])
+    if write_to_sheet:
+        mets_headers = ["timestamp","station_id","station_name","temp_value_celcius","humidity_value_percentage","wind_speed_ms","wind_dir_deg"]
+        mets_value_ws_frame = ensure_worksheet(sh, "mets_data", mets_headers)
+        # ensure header exists on a brand-new sheet
+        if not mets_value_ws_frame.get_all_values():
+            mets_value_ws_frame.append_row(mets_headers, value_input_option="USER_ENTERED")
+        append_unique(mets_value_ws_frame, mets_data, key_cols=["timestamp", "station_id"])
 
     return mets_data
 
-def backfill_rainfall_processing(rainfall_df):
+def rainfall_summary_processing(rainfall_df):
     sums = defaultdict(float)
     meta = {}
     sums_by_day = defaultdict(float)
@@ -312,6 +395,7 @@ def backfill_rainfall_processing(rainfall_df):
         return_row.append([date_,"SSS", "All Station", "", "",sum_mm,])
 
     return_row.sort(key=lambda r: (r[0], r[1]))
+
     return return_row
 
 def normalise_24h_forecast_reading():
@@ -358,17 +442,256 @@ def run_24h_forecast(sh):
 
     append_unique(ws, data, key_cols=["date","region","period_start"])
 
-def backfill_rainfall(sh, rainfall_df):
+def circular_std_deg(vals):
+    """Circular spread of wind direction in degrees (0..180)."""
+    arr = pd.to_numeric(pd.Series(vals), errors="coerce").dropna().values
+    if len(arr) == 0:
+        return np.nan
+
+    rads = np.deg2rad(arr.astype(float))
+    R = np.hypot(np.sin(rads).sum(), np.cos(rads).sum()) / len(rads)
+    if R <= 0:
+        return 180.0
+
+    return np.rad2deg(np.sqrt(-2 * np.log(R))) if R < 1 else 0.0
+
+def modal(series):
+    s = [str(x).strip() for x in series if x is not None and str(x).strip() != ""]
+    if not s:
+        return ""
+    return Counter(s).most_common(1)[0][0]
+
+def label_from_metrics(rain_mm, temp_c, rh_pct, wind_ms):
+    rain = (rain_mm or 0.0)
+    if rain >= 5:  
+        return "Heavy Rain"
+
+    if rain >= 1:  
+        return "Moderate Rain"
+
+    if rain > 0:   
+        return "Light Showers"
+
+    if (rh_pct is not None and temp_c is not None) and (rh_pct >= 90 and temp_c <= 25): 
+        return "Mist"
+
+    if (wind_ms or 0) >= 8: 
+        return "Windy"
+
+    if rh_pct is not None:
+        if rh_pct >= 80: 
+            return "Cloudy"
+        if 60 <= rh_pct < 80: 
+            return "Partly Cloudy"
+
+    if temp_c is not None and temp_c >= 33: 
+        return "Fair and Warm"
+
+    return "Fair"
+
+def build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value, mets_data, target_date_iso):
     """
-    Ensures a single tab with both station-level daily totals and one 'All Station' row per day.
+    zone_to_stations: dict {zone_name: [station_id,...]}
+    rainfall_summary_value: rows from backfill_rainfall_processing(), each:
+        [timestamp_iso, station_id, station_name, lat, lon, rain_total_mm]
+        plus one 'All Station' row with station_id='SSS'
+    mets_data: list of lists [timestamp, station_id, station_name, temp_c, rh_pct, wind_ms, wind_dir_deg]
+    target_date_iso: 'YYYY-mm-dd'
+    Returns a DataFrame with columns:
+        date, zone_name, weather_label, rain_mm, max_temp, min_temp,
+        rh_mean, wind_ms_mean, wind_ms_max, wind_dir_variability
     """
-    headers = ["timestamp","station_id","station_name","lat","lon","rain_total_mm"]
-    ws = ensure_worksheet(sh, "rainfall_daily_combined", headers)
-    rows = backfill_rainfall_processing(rainfall_df)
-    # dedupe by (timestamp, station_id) so the all-station row stays unique per day
-    append_unique(ws, rows, key_cols=["timestamp","station_id"])
-    
-    return len(rows)
+    target_d = dt.date.fromisoformat(target_date_iso)
+
+    # ---- Parse rainfall per station from the pre-aggregated summary (and pick up SSS) ----
+    per_station = {}   # station_id -> total_mm on target date
+    all_zone_rain = np.nan
+
+    for row in (rainfall_summary_value or []):
+        if not row or len(row) < 6:
+            continue
+        ts, sid, sname, lat, lon, total = row[:6]
+        t = to_dt(ts)
+        if not t or t.date() != target_d:
+            continue
+        sid = str(sid).strip()
+        try:
+            v = float(total or 0.0)
+        except Exception:
+            v = 0.0
+
+        if sid == "SSS":
+            all_zone_rain = v  # already computed "All Station" total/mean from your backfill
+        else:
+            per_station[sid] = v
+
+    # Fallback if SSS row missing: mean across station totals we have
+    if (all_zone_rain != all_zone_rain) or all_zone_rain is None:  # NaN check
+        if per_station:
+            all_zone_rain = float(np.mean(list(per_station.values())))
+        else:
+            all_zone_rain = np.nan
+
+    # ---- Per-zone rainfall (mean across member stations that have a value) ----
+    zone_rain_rows = []
+    for zname, sids in (zone_to_stations or {}).items():
+        vals = [per_station.get(s) for s in sids if s in per_station]
+        vals = [v for v in vals if v is not None]
+        zone_rain_rows.append([zname, (float(np.mean(vals)) if vals else np.nan)])
+    rain_df = pd.DataFrame(zone_rain_rows, columns=["zone_key","rain_mm"])
+
+    # ---- METS per zone ----
+    mets_df = pd.DataFrame(mets_data or [], columns=[
+        "timestamp","station_id","station_name","temp_c","rh_pct","wind_ms","wind_dir_deg"
+    ])
+    for c in ["temp_c","rh_pct","wind_ms","wind_dir_deg"]:
+        mets_df[c] = pd.to_numeric(mets_df[c], errors="coerce")
+
+    met_rows = []
+    for zkey, sids in (zone_to_stations or {}).items():
+        zdf = mets_df[mets_df["station_id"].isin(sids)]
+        if zdf.empty:
+            met_rows.append([zkey, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
+        else:
+            met_rows.append([
+                zkey,
+                float(zdf["temp_c"].max()),
+                float(zdf["temp_c"].min()),
+                float(zdf["rh_pct"].mean()),
+                float(zdf["wind_ms"].mean()),
+                float(zdf["wind_ms"].max()),
+                float(circular_std_deg(zdf["wind_dir_deg"].tolist())),
+            ])
+    met_df = pd.DataFrame(met_rows, columns=[
+        "zone_key","max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
+    ])
+
+    # ---- Join rain + mets ----
+    merged = rain_df.merge(met_df, on="zone_key", how="outer")
+    merged["zone_name"] = merged["zone_key"]
+
+    # ---- Weather label from metrics (no day/night split) ----
+    merged["weather_label"] = [
+        label_from_metrics(
+            rain_mm = r.get("rain_mm"),
+            temp_c  = r.get("max_temp"),
+            rh_pct  = r.get("rh_mean"),
+            wind_ms = r.get("wind_ms_mean"),
+        )
+        for _, r in merged.iterrows()
+    ]
+
+    # ---- Order/round/shape ----
+    merged.insert(0, "date", target_date_iso)
+    merged = merged[[
+        "date","zone_name","weather_label","rain_mm","max_temp","min_temp",
+        "rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
+    ]]
+
+    for c in ["rain_mm","max_temp","min_temp","rh_mean","wind_dir_variability"]:
+        merged[c] = pd.to_numeric(merged[c], errors="coerce").round(1)
+    merged["wind_ms_mean"] = pd.to_numeric(merged["wind_ms_mean"], errors="coerce").round(2)
+    merged["wind_ms_max"]  = pd.to_numeric(merged["wind_ms_max"],  errors="coerce").round(2)
+
+    # ---- ALL ZONE row (use SSS if present, else fallback mean) ----
+    if mets_df.empty:
+        all_met = [np.nan]*6
+    else:
+        all_met = [
+            float(mets_df["temp_c"].max()),
+            float(mets_df["temp_c"].min()),
+            float(mets_df["rh_pct"].mean()),
+            float(mets_df["wind_ms"].mean()),
+            float(mets_df["wind_ms"].max()),
+            float(circular_std_deg(mets_df["wind_dir_deg"].tolist())),
+        ]
+
+    all_row = pd.DataFrame([{
+        "date": target_date_iso,
+        "zone_name": "All Zone",
+        "weather_label": label_from_metrics(
+            rain_mm = np.round(all_zone_rain, 1) if all_zone_rain==all_zone_rain else np.nan,
+            temp_c  = all_met[0] if all_met[0]==all_met[0] else np.nan,
+            rh_pct  = all_met[2] if all_met[2]==all_met[2] else np.nan,
+            wind_ms = all_met[3] if all_met[3]==all_met[3] else np.nan,
+        ),
+        "rain_mm": np.round(all_zone_rain, 1) if all_zone_rain==all_zone_rain else np.nan,
+        "max_temp": np.round(all_met[0], 1) if all_met[0]==all_met[0] else np.nan,
+        "min_temp": np.round(all_met[1], 1) if all_met[1]==all_met[1] else np.nan,
+        "rh_mean":  np.round(all_met[2], 1) if all_met[2]==all_met[2] else np.nan,
+        "wind_ms_mean": np.round(all_met[3], 2) if all_met[3]==all_met[3] else np.nan,
+        "wind_ms_max":  np.round(all_met[4], 2) if all_met[4]==all_met[4] else np.nan,
+        "wind_dir_variability": np.round(all_met[5], 1) if all_met[5]==all_met[5] else np.nan,
+    }])
+
+    out = pd.concat([merged, all_row], ignore_index=True)
+    out = out.sort_values(by=["zone_name"]).reset_index(drop=True)
+    return out
+
+
+def write_daily_zone_weather(sh, df):
+    """
+    Upsert df into 'daily_zone_weather' on (date, zone_name).
+    """
+    headers = [ "date", "zone_name", "weather_label", "rain_mm", "max_temp", "min_temp", "rh_mean", "wind_ms_mean", "wind_ms_max", "wind_dir_variability"]
+    ws = ensure_worksheet(sh, "daily_zone_weather", headers)
+    data = ws.get_all_values()
+
+    if data:
+        cur_hdr = data[0]
+        cur_rows = data[1:]
+        cur = pd.DataFrame(cur_rows, columns=cur_hdr)
+    else:
+        cur = pd.DataFrame(columns=headers)
+
+    # normalize dtypes
+    if "date" not in cur.columns:
+        cur = pd.DataFrame(columns=headers)
+
+    # drop existing rows for that date (we upsert *the whole day* set)
+    tgt_date = str(df.iloc[0]["date"])
+    cur = cur[cur["date"] != tgt_date]
+
+    # append new
+    merged = pd.concat([cur, df], ignore_index=True)
+
+    # sort
+    merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+    merged = merged.sort_values(["date","zone_name"]).reset_index(drop=True)
+    merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
+
+    # write back
+    ws.clear()
+    ws.append_row(headers, value_input_option="USER_ENTERED")
+    rows = merged.astype(object).where(pd.notnull(merged), "").values.tolist()
+    if rows:
+        for i in range(0, len(rows), 500):
+            ws.append_rows(rows[i:i+500], value_input_option="USER_ENTERED")
+
+def load_zone_to_stations_from_sheet(sh, sheet_name="zone_station_map"):
+    """
+    Expects sheet with columns:
+      zone_id | zone_name | station_id | station_name | station_lat | station_lon
+    Returns: dict { zone_name (exact) : [station_id, ...] }
+    """
+    ws = ensure_worksheet(sh, sheet_name,
+                          ["zone_id","zone_name","station_id","station_name","station_lat","station_lon"])
+    vals = ws.get_all_values()
+    z2s = {}
+    if not vals or len(vals) < 2:
+        return z2s
+    hdr = vals[0]
+    idx = {h: i for i, h in enumerate(hdr)}
+    for row in vals[1:]:
+        try:
+            zname = row[idx["zone_name"]].strip()
+            sid   = row[idx["station_id"]].strip()
+        except Exception:
+            continue
+        if not zname or not sid:
+            continue
+        z2s.setdefault(zname, []).append(sid)
+    return z2s
 
 
 if __name__ == "__main__":
@@ -389,15 +712,25 @@ if __name__ == "__main__":
     start_date = ytd_date_str
     end_date = tdy_date_str
 
+    zone_to_stations = load_zone_to_stations_from_sheet(sh, sheet_name="zone_station_map")
+
     for n, d in enumerate(iter_dates_inclusive(start_date, end_date), start=1):
         
         ds = d.isoformat()
         rainfall_value, rainfall_area = run_rainfall(sh, ds)
-        #print(ds,": pulling rainfall area")
-        wrote = backfill_rainfall(sh, rainfall_value or [])
+        rainfall_summary_headers = ["timestamp","station_id","station_name","lat","lon","rain_total_mm"]
+        rainfall_summary_ws = ensure_worksheet(sh, "rainfall_daily_combined", rainfall_summary_headers)
 
-        #run_mets(sh, rainfall_area, ds)
-        #print("Done writing mets")
+        if not rainfall_summary_ws.get_all_values():
+            rainfall_summary_ws.append_row(rainfall_summary_headers, value_input_option="USER_ENTERED")
+
+        rainfall_summary_value = rainfall_summary_processing(rainfall_value or [])
+        append_unique(rainfall_summary_ws, rainfall_summary_value, key_cols=["timestamp","station_id"])
+
+        mets_data = run_mets(sh, rainfall_area, ds, write_to_sheet = False)
+
+        df = build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value, mets_data, ds)
+        write_daily_zone_weather(sh, df)
 
         # Soft throttle every 5 days processed
         if n % 5 == 0:
