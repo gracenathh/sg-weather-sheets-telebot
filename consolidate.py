@@ -394,7 +394,7 @@ if __name__ == "__main__":
         ds = d.isoformat()
         rainfall_value, rainfall_area = run_rainfall(sh, ds)
         #print(ds,": pulling rainfall area")
-        #wrote = backfill_rainfall(sh, rainfall_value or [])
+        wrote = backfill_rainfall(sh, rainfall_value or [])
 
         #run_mets(sh, rainfall_area, ds)
         #print("Done writing mets")
