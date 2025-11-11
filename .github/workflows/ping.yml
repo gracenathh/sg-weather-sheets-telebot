@@ -1,13 +1,13 @@
-name: ping (schedule probe)
+#name: ping (schedule probe)
 
-on:
-  schedule:
-    - cron: "*/10 * * * *"
-  workflow_dispatch: {}
+#on:
+#  schedule:
+#    - cron: "*/10 * * * *"
+#  workflow_dispatch: {}
 
-jobs:
-  ping:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Echo time (UTC)
-        run: date -u
+#jobs:
+#  ping:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Echo time (UTC)
+#        run: date -u
