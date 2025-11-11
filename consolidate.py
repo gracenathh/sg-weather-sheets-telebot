@@ -489,88 +489,94 @@ def label_from_metrics(rain_mm, temp_c, rh_pct, wind_ms):
 
     return "Fair"
 
-def build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value, mets_data, target_date_iso):
-    """
-    zone_to_stations: dict {zone_name: [station_id,...]}
-    rainfall_summary_value: rows from backfill_rainfall_processing(), each:
-        [timestamp_iso, station_id, station_name, lat, lon, rain_total_mm]
-        plus one 'All Station' row with station_id='SSS'
-    mets_data: list of lists [timestamp, station_id, station_name, temp_c, rh_pct, wind_ms, wind_dir_deg]
-    target_date_iso: 'YYYY-mm-dd'
-    Returns a DataFrame with columns:
-        date, zone_name, weather_label, rain_mm, max_temp, min_temp,
-        rh_mean, wind_ms_mean, wind_ms_max, wind_dir_variability
-    """
+def build_daily_zone_weather_from_lists(
+    zone_to_stations,
+    rainfall_summary_value,
+    mets_data,
+    target_date_iso,
+    rain_agg = "sum",  # "sum" or "mean" if you ever want to switch
+):
     target_d = dt.date.fromisoformat(target_date_iso)
 
-    # ---- Parse rainfall per station from the pre-aggregated summary (and pick up SSS) ----
-    per_station = {}   # station_id -> total_mm on target date
-    all_zone_rain = np.nan
-
+    # -------- per-station daily rainfall & ALL (SSS) --------
+    per_station = {}    # sid -> total_mm on target date
+    sss_value   = None  # keep SSS if provided
     for row in (rainfall_summary_value or []):
-        if not row or len(row) < 6:
+        if not row or len(row) < 6: 
             continue
-        ts, sid, sname, lat, lon, total = row[:6]
+        ts, sid, *_rest, total = row[:6]
         t = to_dt(ts)
         if not t or t.date() != target_d:
             continue
         sid = str(sid).strip()
-        try:
-            v = float(total or 0.0)
-        except Exception:
-            v = 0.0
-
+        v = float(total or 0.0)
         if sid == "SSS":
-            all_zone_rain = v  # already computed "All Station" total/mean from your backfill
+            sss_value = v
         else:
-            per_station[sid] = v
+            per_station[sid] = per_station.get(sid, 0.0) + v
 
-    # Fallback if SSS row missing: mean across station totals we have
-    if (all_zone_rain != all_zone_rain) or all_zone_rain is None:  # NaN check
-        if per_station:
-            all_zone_rain = float(np.mean(list(per_station.values())))
-        else:
+    # ALL ZONE rain: prefer SSS if present; else aggregate all stations (sum if "sum", mean if "mean")
+    if sss_value is not None:
+        all_zone_rain = sss_value
+    else:
+        vals = list(per_station.values())
+        if not vals:
             all_zone_rain = np.nan
+        else:
+            all_zone_rain = float(np.sum(vals) if rain_agg == "sum" else np.mean(vals))
 
-    # ---- Per-zone rainfall (mean across member stations that have a value) ----
-    zone_rain_rows = []
-    for zname, sids in (zone_to_stations or {}).items():
+    # -------- authoritative zone list so every zone appears --------
+    zones_list = list((zone_to_stations or {}).keys())
+    base = pd.DataFrame({"zone_name": zones_list})
+
+    # -------- zone rainfall (aggregate across mapped station ids) --------
+    rain_rows = []
+    for zname in zones_list:
+        sids = [str(s).strip() for s in (zone_to_stations.get(zname) or [])]
         vals = [per_station.get(s) for s in sids if s in per_station]
         vals = [v for v in vals if v is not None]
-        zone_rain_rows.append([zname, (float(np.mean(vals)) if vals else np.nan)])
-    rain_df = pd.DataFrame(zone_rain_rows, columns=["zone_key","rain_mm"])
+        if not vals:
+            agg_val = np.nan
+        else:
+            agg_val = float(np.sum(vals) if rain_agg == "sum" else np.mean(vals))
+        rain_rows.append([zname, agg_val])
+    rain_df = pd.DataFrame(rain_rows, columns=["zone_name","rain_mm"])
 
-    # ---- METS per zone ----
+    # -------- METS per zone --------
     mets_df = pd.DataFrame(mets_data or [], columns=[
         "timestamp","station_id","station_name","temp_c","rh_pct","wind_ms","wind_dir_deg"
     ])
-    for c in ["temp_c","rh_pct","wind_ms","wind_dir_deg"]:
-        mets_df[c] = pd.to_numeric(mets_df[c], errors="coerce")
+    if not mets_df.empty:
+        mets_df["station_id"] = mets_df["station_id"].astype(str).str.strip()
+        for c in ["temp_c","rh_pct","wind_ms","wind_dir_deg"]:
+            mets_df[c] = pd.to_numeric(mets_df[c], errors="coerce")
 
     met_rows = []
-    for zkey, sids in (zone_to_stations or {}).items():
-        zdf = mets_df[mets_df["station_id"].isin(sids)]
+    for zname in zones_list:
+        sids = [str(s).strip() for s in (zone_to_stations.get(zname) or [])]
+        zdf = mets_df[mets_df["station_id"].isin(sids)] if (not mets_df.empty and sids) else pd.DataFrame()
         if zdf.empty:
-            met_rows.append([zkey, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
+            met_rows.append([zname, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
         else:
             met_rows.append([
-                zkey,
+                zname,
                 float(zdf["temp_c"].max()),
                 float(zdf["temp_c"].min()),
                 float(zdf["rh_pct"].mean()),
                 float(zdf["wind_ms"].mean()),
                 float(zdf["wind_ms"].max()),
-                float(circular_std_deg(zdf["wind_dir_deg"].tolist())),
+                float(circular_std_deg(zdf["wind_dir_deg"].dropna().tolist())),
             ])
     met_df = pd.DataFrame(met_rows, columns=[
-        "zone_key","max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
+        "zone_name","max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
     ])
 
-    # ---- Join rain + mets ----
-    merged = rain_df.merge(met_df, on="zone_key", how="outer")
-    merged["zone_name"] = merged["zone_key"]
+    # -------- merge on zone list (left joins keep every zone) --------
+    merged = base.merge(rain_df, on="zone_name", how="left") \
+                 .merge(met_df,  on="zone_name", how="left")
 
-    # ---- Weather label from metrics (no day/night split) ----
+    # -------- label (works even if rain_mm is NaN) --------
+    merged.insert(0, "date", target_date_iso)
     merged["weather_label"] = [
         label_from_metrics(
             rain_mm = r.get("rain_mm"),
@@ -581,19 +587,17 @@ def build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value
         for _, r in merged.iterrows()
     ]
 
-    # ---- Order/round/shape ----
-    merged.insert(0, "date", target_date_iso)
+    # -------- order + rounding --------
     merged = merged[[
         "date","zone_name","weather_label","rain_mm","max_temp","min_temp",
         "rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
     ]]
-
     for c in ["rain_mm","max_temp","min_temp","rh_mean","wind_dir_variability"]:
         merged[c] = pd.to_numeric(merged[c], errors="coerce").round(1)
     merged["wind_ms_mean"] = pd.to_numeric(merged["wind_ms_mean"], errors="coerce").round(2)
     merged["wind_ms_max"]  = pd.to_numeric(merged["wind_ms_max"],  errors="coerce").round(2)
 
-    # ---- ALL ZONE row (use SSS if present, else fallback mean) ----
+    # -------- ALL ZONE row --------
     if mets_df.empty:
         all_met = [np.nan]*6
     else:
@@ -603,25 +607,24 @@ def build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value
             float(mets_df["rh_pct"].mean()),
             float(mets_df["wind_ms"].mean()),
             float(mets_df["wind_ms"].max()),
-            float(circular_std_deg(mets_df["wind_dir_deg"].tolist())),
+            float(circular_std_deg(mets_df["wind_dir_deg"].dropna().tolist())),
         ]
-
     all_row = pd.DataFrame([{
         "date": target_date_iso,
         "zone_name": "All Zone",
         "weather_label": label_from_metrics(
-            rain_mm = np.round(all_zone_rain, 1) if all_zone_rain==all_zone_rain else np.nan,
-            temp_c  = all_met[0] if all_met[0]==all_met[0] else np.nan,
-            rh_pct  = all_met[2] if all_met[2]==all_met[2] else np.nan,
-            wind_ms = all_met[3] if all_met[3]==all_met[3] else np.nan,
+            rain_mm = np.round(all_zone_rain, 1) if np.isfinite(all_zone_rain) else np.nan,
+            temp_c  = all_met[0] if np.isfinite(all_met[0]) else np.nan,
+            rh_pct  = all_met[2] if np.isfinite(all_met[2]) else np.nan,
+            wind_ms = all_met[3] if np.isfinite(all_met[3]) else np.nan,
         ),
-        "rain_mm": np.round(all_zone_rain, 1) if all_zone_rain==all_zone_rain else np.nan,
-        "max_temp": np.round(all_met[0], 1) if all_met[0]==all_met[0] else np.nan,
-        "min_temp": np.round(all_met[1], 1) if all_met[1]==all_met[1] else np.nan,
-        "rh_mean":  np.round(all_met[2], 1) if all_met[2]==all_met[2] else np.nan,
-        "wind_ms_mean": np.round(all_met[3], 2) if all_met[3]==all_met[3] else np.nan,
-        "wind_ms_max":  np.round(all_met[4], 2) if all_met[4]==all_met[4] else np.nan,
-        "wind_dir_variability": np.round(all_met[5], 1) if all_met[5]==all_met[5] else np.nan,
+        "rain_mm": np.round(all_zone_rain, 1) if np.isfinite(all_zone_rain) else np.nan,
+        "max_temp": np.round(all_met[0], 1) if np.isfinite(all_met[0]) else np.nan,
+        "min_temp": np.round(all_met[1], 1) if np.isfinite(all_met[1]) else np.nan,
+        "rh_mean":  np.round(all_met[2], 1) if np.isfinite(all_met[2]) else np.nan,
+        "wind_ms_mean": np.round(all_met[3], 2) if np.isfinite(all_met[3]) else np.nan,
+        "wind_ms_max":  np.round(all_met[4], 2) if np.isfinite(all_met[4]) else np.nan,
+        "wind_dir_variability": np.round(all_met[5], 1) if np.isfinite(all_met[5]) else np.nan,
     }])
 
     out = pd.concat([merged, all_row], ignore_index=True)
@@ -726,9 +729,7 @@ if __name__ == "__main__":
 
         rainfall_summary_value = rainfall_summary_processing(rainfall_value or [])
         append_unique(rainfall_summary_ws, rainfall_summary_value, key_cols=["timestamp","station_id"])
-
         mets_data = run_mets(sh, rainfall_area, ds, write_to_sheet = False)
-
         df = build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value, mets_data, ds)
         write_daily_zone_weather(sh, df)
 
