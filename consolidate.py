@@ -7,8 +7,6 @@ from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 from datetime import date, timedelta
 from collections import defaultdict, Counter
-from shapely import wkt
-from shapely.geometry import Point
 import pandas as pd
 import numpy as np
 from urllib.parse import urlparse, parse_qs
