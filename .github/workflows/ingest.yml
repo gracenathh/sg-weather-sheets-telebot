@@ -1,14 +1,11 @@
 name: sg-weather-sheets-telebot (ingest)
 
 on:
-  # manual run button in GitHub → Actions
   workflow_dispatch: {}
-  # schedule (GitHub cron is UTC). This runs at 00:05, 06:05, 12:05, 18:05 SGT. "5 16,22,4,10 * * *"
-  # alternatively, run every 5th-mins of every hour
+  # Every 4 hours (UTC) → 08:00, 12:00, 16:00, 20:00 SGT
   schedule:
     - cron: "0 */4 * * *"
 
-# prevent overlapping runs
 concurrency:
   group: weather-prod
   cancel-in-progress: false
@@ -18,11 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
-    # expose secrets as env vars your script reads
     env:
       SHEET_ID: ${{ secrets.SHEET_ID }}
       DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
-      # we'll write SA_JSON into this path at runtime:
       GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
 
     steps:
@@ -36,26 +31,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install python-dotenv
-          pip install pandas
-          pip install numpy
-          pip install concurrent
-          pip install urllib
+          # Prefer a single source of truth for deps:
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Minimal direct installs if you don't have requirements.txt
+            pip install requests pandas numpy python-dotenv gspread google-auth google-auth-oauthlib shapely
+          fi
 
-      # If you stored pretty JSON in SA_JSON (recommended)
       - name: Write service account JSON
         run: |
           echo '${{ secrets.SA_JSON }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
-
-      # (Optional) If you instead stored base64 as SA_JSON_B64, use this block instead:
-      # - name: Write service account JSON (base64)
-      #   run: |
-      #     echo '${{ secrets.SA_JSON_B64 }}' | base64 -d > "$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Sanity check JSON
         run: |
@@ -67,6 +58,8 @@ jobs:
           PY
 
       - name: Diagnostic - check rainfall API
+        env:
+          DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
         run: |
           python - <<'PY'
           import os, requests, json
@@ -75,13 +68,9 @@ jobs:
           r = requests.get(url, headers=H, timeout=20)
           print("HTTP:", r.status_code)
           J = r.json()
-          print("top-level keys:", list(J.keys()))
-          print("errorMsg:", J.get("errorMsg"))
           D = J.get("data") or {}
-          recs = D.get("records") or D.get("readings") or []
-          print("records len:", len(recs) if isinstance(recs, list) else f"type={type(recs).__name__}")
-          if isinstance(recs, list) and recs[:1]:
-            print("sample:", json.dumps(recs[0], default=str)[:300])
+          print("keys:", list(J.keys()), "data.keys:", list(D.keys()))
+          print("readings len:", len(D.get("readings") or []))
           PY
 
       - name: Run consolidate
