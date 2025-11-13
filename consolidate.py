@@ -469,6 +469,8 @@ def label_from_metrics(rain_mm, temp_c, rh_pct, wind_ms):
         return "Moderate Rain"
     if rain >= 1:   
         return "Light Rain"
+    if rain > 0:   
+        return "Very Light Rain"
 
     if (rh_pct is not None and temp_c is not None) and (rh_pct >= 90 and temp_c <= 25): 
         return "Mist"
