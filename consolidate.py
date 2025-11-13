@@ -461,14 +461,14 @@ def modal(series):
 
 def label_from_metrics(rain_mm, temp_c, rh_pct, wind_ms):
     rain = (rain_mm or 0.0)
-    if rain >= 5:  
+    if rain >= 64:  
+        return "Very Heavy Rain"
+    if rain >= 31:  
         return "Heavy Rain"
-
-    if rain >= 1:  
+    if rain >= 11:  
         return "Moderate Rain"
-
-    if rain > 0:   
-        return "Light Showers"
+    if rain >= 1:   
+        return "Light Rain"
 
     if (rh_pct is not None and temp_c is not None) and (rh_pct >= 90 and temp_c <= 25): 
         return "Mist"
