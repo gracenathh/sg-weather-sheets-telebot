@@ -1,0 +1,73 @@
+name: sg-weather-sheets-telebot (realtime_rainfall)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"   # best‑effort every 5 minutes (UTC)
+
+concurrency:
+  group: weather-prod
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Echo time (UTC)
+        run: date -u
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests pandas numpy python-dotenv gspread google-auth google-auth-oauthlib shapely
+          fi
+
+      - name: Write service account JSON
+        run: |
+          echo '${{ secrets.SA_JSON }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Sanity check JSON
+        run: |
+          python - <<'PY'
+          import json, os
+          p = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+          json.load(open(p))
+          print("Service account JSON OK at:", p)
+          PY
+
+      - name: Diagnostic - check rainfall API
+        run: |
+          python - <<'PY'
+          import os, requests
+          H = {"X-Api-Key": os.environ.get("DATA_GOV_SG_API_KEY",""), "User-Agent": "gha-preflight/1.0"}
+          url = "https://api-open.data.gov.sg/v2/real-time/api/rainfall"
+          r = requests.get(url, headers=H, timeout=20)
+          print("HTTP:", r.status_code)
+          D = (r.json() or {}).get("data") or {}
+          print("readings len:", len(D.get("readings") or []))
+          PY
+
+      - name: Run realtime_rainfall_reading
+        run: python realtime_rainfall_reading.py
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
