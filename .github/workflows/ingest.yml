@@ -2,7 +2,6 @@ name: sg-weather-sheets-telebot (ingest)
 
 on:
   workflow_dispatch: {}
-  # Every 4 hours (UTC) → 08:00, 12:00, 16:00, 20:00 SGT
   schedule:
     - cron: "0 */4 * * *"
 
