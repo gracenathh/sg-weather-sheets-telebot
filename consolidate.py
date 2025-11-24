@@ -813,30 +813,33 @@ def write_zone_weather_with_tod(sh, df):
                "max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"]
     ws = ensure_worksheet(sh, "tod_daily_zone_weather", headers)
     data = ws.get_all_values()
-    existing_keys = set()
     if data:
-        header = data[0]
-        idx = {name: header.index(name) for name in headers}
-        for row in data[1:]:
-            if len(row) < len(headers):
-                continue
-            key = (row[idx["date"]], row[idx["time_of_day"]], row[idx["zone_name"]])
-            existing_keys.add(key)
+        existing = pd.DataFrame(data[1:], columns=data[0])
     else:
         ws.append_row(headers, value_input_option="USER_ENTERED")
+        existing = pd.DataFrame(columns=headers)
 
-    prepared = df.astype(object).where(pd.notnull(df), "").values.tolist()
-    to_append = []
-    for row in prepared:
-        key = (row[0], row[1], row[2])
-        if key in existing_keys:
-            continue
-        to_append.append(row)
-        existing_keys.add(key)
+    df_clean = df.astype(object).where(pd.notnull(df), "")
+    new_keys = set(
+        (row["date"], row["time_of_day"], row["zone_name"])
+        for _, row in df_clean.iterrows()
+    )
+    if not existing.empty:
+        existing = existing[~existing.apply(
+            lambda r: (r["date"], r["time_of_day"], r["zone_name"]) in new_keys,
+            axis=1
+        )]
 
-    if to_append:
-        for i in range(0, len(to_append), 500):
-            ws.append_rows(to_append[i:i+500], value_input_option="USER_ENTERED")
+    merged = pd.concat([existing, df_clean], ignore_index=True)
+    merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+    merged = merged.sort_values(["date","time_of_day","zone_name"]).reset_index(drop=True)
+    merged["date"] = merged["date"].dt.strftime("%Y-%m-%d")
+
+    ws.clear()
+    ws.append_row(headers, value_input_option="USER_ENTERED")
+    rows = merged.astype(object).where(pd.notnull(merged), "").values.tolist()
+    for i in range(0, len(rows), 500):
+        ws.append_rows(rows[i:i+500], value_input_option="USER_ENTERED")
             
 def load_zone_to_stations_from_sheet(sh, sheet_name="zone_station_map"):
     """
