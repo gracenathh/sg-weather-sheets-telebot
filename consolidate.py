@@ -515,15 +515,19 @@ def build_daily_zone_weather_from_lists(
         else:
             per_station[sid] = per_station.get(sid, 0.0) + v
 
-    # ALL ZONE rain: prefer SSS if present; else aggregate all stations (sum if "sum", mean if "mean")
+    # ALL ZONE rain: prefer SSS if present; else aggregate all stations (average across stations)
     if sss_value is not None:
-        all_zone_rain = sss_value
+        station_count = len(per_station)
+        if station_count > 0:
+            all_zone_rain = float(sss_value) / station_count
+        else:
+            all_zone_rain = float(sss_value)
     else:
         vals = list(per_station.values())
         if not vals:
             all_zone_rain = np.nan
         else:
-            all_zone_rain = float(np.sum(vals) if rain_agg == "sum" else np.mean(vals))
+            all_zone_rain = float(np.mean(vals))
 
     # -------- authoritative zone list so every zone appears --------
     zones_list = list((zone_to_stations or {}).keys())
@@ -538,7 +542,7 @@ def build_daily_zone_weather_from_lists(
         if not vals:
             agg_val = np.nan
         else:
-            agg_val = float(np.sum(vals) if rain_agg == "sum" else np.mean(vals))
+            agg_val = float(np.mean(vals))
         rain_rows.append([zname, agg_val])
     rain_df = pd.DataFrame(rain_rows, columns=["zone_name","rain_mm"])
 
