@@ -18,6 +18,14 @@ SGT = dt.timezone(dt.timedelta(hours=8))
 UA = os.getenv("USER_AGENT", "sg-weather-collector/1.0")
 API_KEY = os.getenv("DATA_GOV_SG_API_KEY")
 SHEET_ID = os.environ["SHEET_ID"]
+TIME_OF_DAY_ORDER = [
+    ("Late Night", 0, 6),
+    ("Breakfast", 6, 10),
+    ("Lunch", 10, 14),
+    ("Tea", 14, 17),
+    ("Dinner", 17, 21),
+    ("Supper", 21, 24),
+]
 
 def open_sheet_by_id(sheet_id):
     creds = Credentials.from_service_account_file(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], scopes=["https://www.googleapis.com/auth/spreadsheets"])
@@ -675,6 +683,161 @@ def write_daily_zone_weather(sh, df):
         for i in range(0, len(rows), 500):
             ws.append_rows(rows[i:i+500], value_input_option="USER_ENTERED")
 
+def tod_label(dt_obj):
+    hour = dt_obj.hour
+    for label, start, end in TIME_OF_DAY_ORDER:
+        if start <= hour < end:
+            return label
+    return "Late Night"
+
+def build_tod_daily_zone_weather_from_lists(
+    zone_to_stations,
+    rainfall_rows,
+    mets_rows,
+    target_date_iso):
+    target_d = dt.date.fromisoformat(target_date_iso)
+    station_to_zones = {}
+    for zone, stations in (zone_to_stations or {}).items():
+        if not zone:
+            continue
+        for sid in stations or []:
+            sid_str = str(sid).strip()
+            if not sid_str:
+                continue
+            station_to_zones.setdefault(sid_str, []).append(zone)
+    zone_names = sorted((zone_to_stations or {}).keys())
+    buckets = [label for label, _, _ in TIME_OF_DAY_ORDER]
+
+    # Collect rainfall per station per bucket
+    station_bucket = {}
+    for row in rainfall_rows or []:
+        sid = str(row[0]).strip()
+        t = to_dt(row[5])
+        if not sid or not t or t.date() != target_d:
+            continue
+        bucket = tod_label(t)
+        station_bucket.setdefault((sid, bucket), []).append(float(row[4] or 0))
+
+    # Aggregate to zone averages per bucket
+    zone_bucket_rain = {}
+    for (sid, bucket), vals in station_bucket.items():
+        zones = station_to_zones.get(sid, [])
+        if not zones:
+            continue
+        avg_val = float(np.mean(vals))
+        for zone in zones:
+            key = (zone, bucket)
+            zone_bucket_rain.setdefault(key, []).append(avg_val)
+
+    # METS metrics per zone/bucket
+    zone_bucket_metrics = {}
+    for row in mets_rows or []:
+        ts, sid, *_rest, temp, rh, wind_ms, wind_dir = row[:7]
+        t = to_dt(ts)
+        sid = str(sid).strip()
+        if not sid or not t or t.date() != target_d:
+            continue
+        bucket = tod_label(t)
+        zones = station_to_zones.get(sid, [])
+        for zone in zones:
+            metrics = zone_bucket_metrics.setdefault((zone, bucket), {"temp": [], "rh": [], "wind": [], "wind_dir": []})
+            if temp not in ("", None):
+                metrics["temp"].append(float(temp))
+            if rh not in ("", None):
+                metrics["rh"].append(float(rh))
+            if wind_ms not in ("", None):
+                metrics["wind"].append(float(wind_ms))
+            if wind_dir not in ("", None):
+                metrics["wind_dir"].append(float(wind_dir))
+
+    rows = []
+    for bucket in buckets:
+        for zone in zone_names:
+            rain_vals = zone_bucket_rain.get((zone, bucket), [])
+            rain_mm = float(np.mean(rain_vals)) if rain_vals else np.nan
+            metrics = zone_bucket_metrics.get((zone, bucket), {})
+            max_temp = float(np.max(metrics.get("temp", []))) if metrics.get("temp") else np.nan
+            min_temp = float(np.min(metrics.get("temp", []))) if metrics.get("temp") else np.nan
+            rh_mean = float(np.mean(metrics.get("rh", []))) if metrics.get("rh") else np.nan
+            wind_mean = float(np.mean(metrics.get("wind", []))) if metrics.get("wind") else np.nan
+            wind_max = float(np.max(metrics.get("wind", []))) if metrics.get("wind") else np.nan
+            wind_var = float(circular_std_deg(metrics.get("wind_dir", []))) if metrics.get("wind_dir") else np.nan
+            rows.append([
+                target_date_iso,
+                bucket,
+                zone,
+                label_from_metrics(rain_mm, max_temp, rh_mean, wind_mean),
+                rain_mm,
+                max_temp,
+                min_temp,
+                rh_mean,
+                wind_mean,
+                wind_max,
+                wind_var,
+            ])
+        # aggregate All Zone row for this bucket
+        all_rain_vals = []
+        all_metrics = {"temp": [], "rh": [], "wind": [], "wind_dir": []}
+        for zone in zone_names:
+            all_rain_vals.extend(zone_bucket_rain.get((zone, bucket), []))
+            metrics = zone_bucket_metrics.get((zone, bucket), {})
+            for key in all_metrics:
+                all_metrics[key].extend(metrics.get(key, []))
+        rain_all = float(np.mean(all_rain_vals)) if all_rain_vals else np.nan
+        max_temp = float(np.max(all_metrics["temp"])) if all_metrics["temp"] else np.nan
+        min_temp = float(np.min(all_metrics["temp"])) if all_metrics["temp"] else np.nan
+        rh_mean = float(np.mean(all_metrics["rh"])) if all_metrics["rh"] else np.nan
+        wind_mean = float(np.mean(all_metrics["wind"])) if all_metrics["wind"] else np.nan
+        wind_max = float(np.max(all_metrics["wind"])) if all_metrics["wind"] else np.nan
+        wind_var = float(circular_std_deg(all_metrics["wind_dir"])) if all_metrics["wind_dir"] else np.nan
+        rows.append([
+            target_date_iso,
+            bucket,
+            "All Zone",
+            label_from_metrics(rain_all, max_temp, rh_mean, wind_mean),
+            rain_all,
+            max_temp,
+            min_temp,
+            rh_mean,
+            wind_mean,
+            wind_max,
+            wind_var,
+        ])
+    return pd.DataFrame(rows, columns=[
+        "date","time_of_day","zone_name","weather_label","rain_mm",
+        "max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"
+    ])
+
+def write_zone_weather_with_tod(sh, df):
+    headers = ["date","time_of_day","zone_name","weather_label","rain_mm",
+               "max_temp","min_temp","rh_mean","wind_ms_mean","wind_ms_max","wind_dir_variability"]
+    ws = ensure_worksheet(sh, "tod_daily_zone_weather", headers)
+    data = ws.get_all_values()
+    existing_keys = set()
+    if data:
+        header = data[0]
+        idx = {name: header.index(name) for name in headers}
+        for row in data[1:]:
+            if len(row) < len(headers):
+                continue
+            key = (row[idx["date"]], row[idx["time_of_day"]], row[idx["zone_name"]])
+            existing_keys.add(key)
+    else:
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+
+    prepared = df.astype(object).where(pd.notnull(df), "").values.tolist()
+    to_append = []
+    for row in prepared:
+        key = (row[0], row[1], row[2])
+        if key in existing_keys:
+            continue
+        to_append.append(row)
+        existing_keys.add(key)
+
+    if to_append:
+        for i in range(0, len(to_append), 500):
+            ws.append_rows(to_append[i:i+500], value_input_option="USER_ENTERED")
+            
 def load_zone_to_stations_from_sheet(sh, sheet_name="zone_station_map"):
     """
     Expects sheet with columns:
@@ -736,6 +899,9 @@ if __name__ == "__main__":
         mets_data = run_mets(sh, rainfall_area, ds, write_to_sheet = False)
         df = build_daily_zone_weather_from_lists(zone_to_stations, rainfall_summary_value, mets_data, ds)
         write_daily_zone_weather(sh, df)
+
+        df_tod = build_tod_daily_zone_weather_from_lists(zone_to_stations, rainfall_value, mets_data, ds)
+        write_zone_weather_with_tod(sh, df_tod)
 
         # Soft throttle every 5 days processed
         if n % 5 == 0:
