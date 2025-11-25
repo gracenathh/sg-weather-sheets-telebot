@@ -724,10 +724,10 @@ def build_tod_daily_zone_weather_from_lists(
         zones = station_to_zones.get(sid, [])
         if not zones:
             continue
-        avg_val = float(np.mean(vals))
+        station_total = float(np.sum(vals))
         for zone in zones:
             key = (zone, bucket)
-            zone_bucket_rain.setdefault(key, []).append(avg_val)
+            zone_bucket_rain.setdefault(key, []).append(station_total)
 
     # METS metrics per zone/bucket
     zone_bucket_metrics = {}
