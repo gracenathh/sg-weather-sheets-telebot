@@ -401,8 +401,8 @@ def drop_rows_for_date(ws, column_name, target_date, parser):
     if len(kept) == len(values):
         return
     ws.clear()
-    for i in range(0, len(kept), 500):
-        ws.append_rows(kept[i:i+500], value_input_option="USER_ENTERED")
+    # append in a single batch if possible to reduce API calls
+    ws.append_rows(kept, value_input_option="USER_ENTERED")
 
 
 def run_2h_forecast(sh, date_str=None, refresh_areas=False):
