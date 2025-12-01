@@ -66,8 +66,8 @@ jobs:
           print("items len:", len(items))
           PY
 
-      - name: Run realtime_2h_forecast_reading
-        run: python realtime_2h_forecast_reading.py
+      - name: Run realtime_2h_nowcast_reading
+        run: python realtime_2h_nowcast_reading.py
 
       - name: Cleanup credentials
         if: always()
