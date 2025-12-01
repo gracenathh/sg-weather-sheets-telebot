@@ -482,8 +482,8 @@ if __name__ == "__main__":
     ytd_date = dt.datetime.now(SGT).date() - dt.timedelta(days=1)
     ytd_date_str = ytd_date.isoformat()
 
-    start_date = "2025-12-01" # ytd_date_str
-    end_date = "2025-12-01" # tdy_date_str
+    start_date = ytd_date_str
+    end_date = tdy_date_str
 
     for n, day in enumerate(iter_dates_inclusive(start_date, end_date), start=1):
         ds = day.isoformat()
