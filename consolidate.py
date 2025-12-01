@@ -872,7 +872,7 @@ if __name__ == "__main__":
     sh = open_sheet_by_id(SHEET_ID)
 
     run_24h_forecast(sh)
-    run_2h_forecast(sh)
+    # run_2h_forecast(sh)
 
     _, rainfall_area = run_rainfall(sh)
 
