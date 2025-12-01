@@ -378,6 +378,33 @@ def build_zone_outputs(rows, area_zone_map):
 
     return zone_rows
 
+def drop_rows_for_date(ws, column_name, target_date, parser):
+    if target_date is None:
+        return
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return
+    header = values[0]
+    if column_name not in header:
+        return
+    idx = header.index(column_name)
+    kept = [header]
+    for row in values[1:]:
+        if len(row) <= idx:
+            continue
+        parsed = parser(row[idx])
+        if parsed is None:
+            kept.append(row)
+            continue
+        if parsed != target_date:
+            kept.append(row)
+    if len(kept) == len(values):
+        return
+    ws.clear()
+    for i in range(0, len(kept), 500):
+        ws.append_rows(kept[i:i+500], value_input_option="USER_ENTERED")
+
+
 def run_2h_forecast(sh, date_str=None, refresh_areas=False):
     """
     Fetches and writes 2h forecasts for a given date (or latest if date_str is None).
@@ -414,8 +441,22 @@ def run_2h_forecast(sh, date_str=None, refresh_areas=False):
             break
     
     if all_values:
-        #title = "forecasts_2h_test"
+        target_date = None
+        if date_str:
+            try:
+                target_date = dt.date.fromisoformat(date_str)
+            except Exception:
+                target_date = None
+        else:
+            target_date = dt.datetime.now(SGT).date()
+
         forecast_value_ws_frame = ensure_worksheet(sh, "nowcasts_2h_data", ["area","valid_from","valid_to","forecast","issued_at"])
+        drop_rows_for_date(
+            forecast_value_ws_frame,
+            "valid_from",
+            target_date,
+            parse_valid_from_date,
+        )
         upsert_forecast_rows(
             forecast_value_ws_frame,
             ["area","valid_from","valid_to","forecast","issued_at"],
@@ -441,6 +482,12 @@ def run_2h_forecast(sh, date_str=None, refresh_areas=False):
                                         ["zone_name","area_count","rain_area_count","rain_ratio",
                                          "forecast","valid_from_date","valid_from_time","valid_to_date",
                                          "valid_to_time","issued_at", "issued_date","issued_time","recommendation"])
+        drop_rows_for_date(
+            area_zone_ws,
+            "valid_from_date",
+            target_date,
+            parse_iso_date,
+        )
         upsert_forecast_rows(
             area_zone_ws,
             ["zone_name","area_count","rain_area_count","rain_ratio",
