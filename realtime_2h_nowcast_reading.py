@@ -24,10 +24,10 @@ RAIN_LIKE_FORECASTS = {
     "Thundery Showers",
     "Heavy Showers",
     "Showers",
-    # "Light Showers",
-    # "Passing Showers",
-    # "Heavy Rain",
-    # "Moderate Rain",
+    "Light Showers",
+    "Passing Showers",
+    "Heavy Rain",
+    "Moderate Rain",
 }
 
 def open_sheet_by_id(sheet_id):
@@ -525,12 +525,11 @@ def normalize_date_str(value: str, fallback: str) -> str:
 if __name__ == "__main__":
     sh = open_sheet_by_id(SHEET_ID)
 
-    tdy_date_str = dt.datetime.now(SGT).date().isoformat()
-    ytd_date = dt.datetime.now(SGT).date() - dt.timedelta(days=1)
-    ytd_date_str = ytd_date.isoformat()
+    today = dt.datetime.now(SGT).date()
+    default_start = today - dt.timedelta(days=max(0, 6))
 
-    start_date = ytd_date_str
-    end_date = tdy_date_str
+    start_date = default_start.isoformat()
+    end_date = today.isoformat()
 
     for n, day in enumerate(iter_dates_inclusive(start_date, end_date), start=1):
         ds = day.isoformat()
