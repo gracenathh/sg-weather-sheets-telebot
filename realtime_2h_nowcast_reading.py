@@ -17,6 +17,7 @@ SGT = dt.timezone(dt.timedelta(hours=8))
 UA = os.getenv("USER_AGENT", "sg-weather-collector/1.0")
 API_KEY = os.getenv("DATA_GOV_SG_API_KEY")
 SHEET_ID = os.environ["SHEET_ID"]
+FORECAST_RETENTION_DAYS = 7
 
 RAIN_LIKE_FORECASTS = {
     "Heavy Thundery Showers with Gusty Winds",
@@ -155,6 +156,31 @@ def load_area_to_zone_map(sh):
         mapping[area] = zone_name.strip()
     return mapping
 
+def get_existing_forecast_dates(sh, sheet_name="nowcasts_2h_data"):
+    ws = ensure_worksheet(sh, sheet_name, ["area","valid_from","valid_to","forecast","issued_at"])
+    values = ws.get_all_values()
+    dates = set()
+    if len(values) <= 1:
+        return dates
+    header = values[0]
+    if "valid_from" not in header:
+        return dates
+    idx = header.index("valid_from")
+    for row in values[1:]:
+        if len(row) <= idx:
+            continue
+        dt_val = to_dt(row[idx])
+        if not dt_val:
+            continue
+        dates.add(dt_val.date())
+    return dates
+
+def rewrite_sheet(ws, rows):
+    ws.clear()
+    if rows:
+        ws.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
+
+
 def upsert_forecast_rows(ws, headers, new_rows, key_cols, sort_cols=None):
     data = ws.get_all_values()
     if data:
@@ -225,10 +251,8 @@ def upsert_forecast_rows(ws, headers, new_rows, key_cols, sort_cols=None):
                     best[key] = row
         combined = list(best.values())
 
-    ws.clear()
-    ws.append_row(headers, value_input_option="USER_ENTERED")
-    for i in range(0, len(combined), 500):
-        ws.append_rows(combined[i:i+500], value_input_option="USER_ENTERED")    
+    rows_out = [headers] + combined
+    rewrite_sheet(ws, rows_out)
 
 def prune_sheet_by_date(ws, column_name, cutoff_date, parser):
     values = ws.get_all_values()
@@ -249,9 +273,7 @@ def prune_sheet_by_date(ws, column_name, cutoff_date, parser):
             kept.append(row)
     if len(kept) == len(values):
         return
-    ws.clear()
-    for i in range(0, len(kept), 500):
-        ws.append_rows(kept[i:i+500], value_input_option="USER_ENTERED")
+    rewrite_sheet(ws, kept)
 
 def latest_forecast_rows(rows):
     """
@@ -400,9 +422,7 @@ def drop_rows_for_date(ws, column_name, target_date, parser):
             kept.append(row)
     if len(kept) == len(values):
         return
-    ws.clear()
-    # append in a single batch if possible to reduce API calls
-    ws.append_rows(kept, value_input_option="USER_ENTERED")
+    rewrite_sheet(ws, kept)
 
 
 def run_2h_forecast(sh, date_str=None, refresh_areas=False):
@@ -526,12 +546,17 @@ if __name__ == "__main__":
     sh = open_sheet_by_id(SHEET_ID)
 
     today = dt.datetime.now(SGT).date()
-    default_start = today - dt.timedelta(days=max(0, 6))
+    default_start = today - dt.timedelta(days=max(0, FORECAST_RETENTION_DAYS - 1))
+    existing_dates = get_existing_forecast_dates(sh)
 
-    start_date = default_start.isoformat()
-    end_date = today.isoformat()
+    dates_to_refresh = {today, today - dt.timedelta(days=1)}
+    cursor = today - dt.timedelta(days=2)
+    while cursor >= default_start:
+        if cursor not in existing_dates:
+            dates_to_refresh.add(cursor)
+        cursor -= dt.timedelta(days=1)
 
-    for n, day in enumerate(iter_dates_inclusive(start_date, end_date), start=1):
+    for n, day in enumerate(sorted(dates_to_refresh), start=1):
         ds = day.isoformat()
         print(f"Fetching 2h forecast for {ds}")
         run_2h_forecast(sh, ds)
