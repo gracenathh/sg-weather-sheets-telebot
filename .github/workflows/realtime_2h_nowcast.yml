@@ -3,7 +3,7 @@ name: sg-weather-sheets-telebot (realtime_2h_forecast)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: weather-2h-forecast
