@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
+  repository_dispatch:
+    types: [trigger-2h-weather]
 
 concurrency:
   group: weather-2h-forecast
