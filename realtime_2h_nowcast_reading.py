@@ -24,9 +24,6 @@ RAIN_LIKE_FORECASTS = {
     "Heavy Thundery Showers",
     "Thundery Showers",
     "Heavy Showers",
-    "Showers",
-    "Light Showers",
-    "Passing Showers",
     "Heavy Rain",
     "Moderate Rain",
 }
