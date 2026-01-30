@@ -27,7 +27,7 @@ RAIN_LIKE_FORECASTS = {
     "Heavy Rain",
     "Moderate Rain",
     "Showers",
-    "Light Showers"
+    "Light Showers",
     "Light Rain",
 }
 
