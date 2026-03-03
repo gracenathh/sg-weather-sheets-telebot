@@ -2,8 +2,9 @@ name: sg-weather-sheets-telebot (realtime_2h_forecast)
 
 on:
   workflow_dispatch:
-  # schedule:
-  #  - cron: "*/5 * * * *"
+  
+  schedule:
+    - cron: "0 * * * *"
   repository_dispatch:
     types: [trigger-2h-weather]
 
