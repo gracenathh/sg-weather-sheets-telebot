@@ -26,8 +26,6 @@ RAIN_LIKE_FORECASTS = {
     "Heavy Showers",
     "Heavy Rain",
     "Moderate Rain",
-    "Showers",
-    "Light Showers",
 }
 
 def open_sheet_by_id(sheet_id):
