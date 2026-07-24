@@ -134,13 +134,18 @@ def delete_rows_in_groups(ws, row_numbers):
     """
     Delete worksheet rows from the bottom upward.
 
-    This prevents the remaining row numbers from shifting
-    before they are deleted.
+    Google Sheets does not allow deleting every non-frozen row,
+    so add one spare empty row when the deletion reaches the
+    worksheet's final physical row.
     """
     if not row_numbers:
         return
 
-    row_numbers = sorted(row_numbers)
+    row_numbers = sorted(set(row_numbers))
+
+    # Keep one spare row in the worksheet.
+    if row_numbers[-1] >= ws.row_count:
+        ws.add_rows(1)
 
     groups = []
     group_start = row_numbers[0]
@@ -149,25 +154,16 @@ def delete_rows_in_groups(ws, row_numbers):
     for row_number in row_numbers[1:]:
         if row_number == group_end + 1:
             group_end = row_number
-            continue
+        else:
+            groups.append((group_start, group_end))
+            group_start = row_number
+            group_end = row_number
 
-        groups.append(
-            (group_start, group_end)
-        )
+    groups.append((group_start, group_end))
 
-        group_start = row_number
-        group_end = row_number
-
-    groups.append(
-        (group_start, group_end)
-    )
-
+    # Delete bottom-up so row positions remain correct.
     for start_row, end_row in reversed(groups):
-        ws.delete_rows(
-            start_row,
-            end_row,
-        )
-
+        ws.delete_rows(start_row, end_row)
 
 def prune_to_rolling_two_days(ws):
     """
