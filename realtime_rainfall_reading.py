@@ -24,7 +24,20 @@ RAIN_HEADERS = ["station_id", "station_name", "lat", "lon", "reading_value", "re
 RAIN_KEY_COLS = ["station_id", "reading_time"]
 
 RAIN_ZONE_SHEET_NAME = os.getenv("RAIN_ZONE_SHEET_NAME", "rainfall_data_sg_zone")
-RAIN_ZONE_HEADERS = ["zone_name", "reading_time", "reading_value", "reading_label"]
+# Keep the first four columns backward-compatible with the existing sheet.
+# `reading_value` now stores the average across reporting stations in the zone.
+RAIN_ZONE_HEADERS = [
+    "zone_name",
+    "reading_time",
+    "reading_value",
+    "reading_label",
+    "max_rain_mm",
+    "wet_station_count",
+    "total_station_count",
+    "wet_station_share",
+    "is_raining",
+    "aggregation_method",
+]
 RAIN_ZONE_KEY_COLS = ["zone_name", "reading_time"]
 
 ZONE_SHEET_NAME = os.getenv("ZONE_SHEET_NAME", "zone_station_map")
@@ -32,6 +45,46 @@ ZONE_SHEET_NAME = os.getenv("ZONE_SHEET_NAME", "zone_station_map")
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("RAIN_INITIAL_LOOKBACK_DAYS", "1"))
 POLL_MINUTES = max(1, int(os.getenv("RAIN_LOOP_MINUTES", "5")))
 ENABLE_LOOP = os.getenv("RAIN_LOOP", "true").lower() not in {"0", "false", "no"}
+
+
+def ensure_worksheet_preserving_rows(sh, title, headers):
+    """
+    Create a worksheet, or safely add new trailing headers to an existing one.
+
+    `sheets_utils.ensure_worksheet` clears a worksheet when its headers change.
+    The realtime zone schema is being extended, so clearing would delete the
+    rainfall history already collected.
+    """
+    ws = next((worksheet for worksheet in sh.worksheets() if worksheet.title == title), None)
+    if ws is None:
+        ws = sh.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws
+
+    existing_headers = ws.row_values(1)
+    if not existing_headers:
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws
+
+    if existing_headers == headers:
+        return ws
+
+    # Only allow a non-destructive schema extension. Stop if existing columns
+    # were renamed/reordered because appending rows would then be unsafe.
+    if existing_headers != headers[:len(existing_headers)]:
+        raise RuntimeError(
+            f"Unexpected headers in '{title}': {existing_headers}. "
+            f"Expected the existing headers to be the start of: {headers}"
+        )
+
+    for column_number, header in enumerate(
+        headers[len(existing_headers):],
+        start=len(existing_headers) + 1,
+    ):
+        ws.update_cell(1, column_number, header)
+
+    return ws
+
 
 def reading_label_from_mm(value):
     rain = float(value or 0.0)
@@ -119,15 +172,18 @@ def build_station_to_zones_map(zone_to_stations):
             sid_str = str(sid).strip()
             if not sid_str:
                 continue
-            station_lookup.setdefault(sid_str, []).append(zone_name)
-    return station_lookup
+            station_lookup.setdefault(sid_str, set()).add(zone_name)
+    # Return lists so the rest of the script does not depend on set ordering.
+    return {station_id: sorted(zones) for station_id, zones in station_lookup.items()}
 
 
 def aggregate_zone_rainfall(rows, station_zone_lookup):
     if not rows or not station_zone_lookup:
         return []
 
-    totals: Dict[Tuple[str, str], float] = {}
+    # One value per station prevents a duplicated API row or duplicated mapping
+    # from affecting a zone's average and wet-station share.
+    readings_by_zone: Dict[Tuple[str, str], Dict[str, float]] = {}
     for row in rows:
         if len(row) < 6:
             continue
@@ -146,11 +202,35 @@ def aggregate_zone_rainfall(rows, station_zone_lookup):
 
         for zone_name in zones:
             key = (zone_name, reading_time)
-            totals[key] = totals.get(key, 0.0) + reading_value
+            readings_by_zone.setdefault(key, {})[station_id] = reading_value
 
     zone_rows = []
-    for (zone_name, reading_time), total in totals.items():
-        zone_rows.append([zone_name, reading_time, round(total, 3), reading_label_from_mm(total)])
+    for (zone_name, reading_time), station_readings in readings_by_zone.items():
+        values = list(station_readings.values())
+        if not values:
+            continue
+
+        avg_rain_mm = sum(values) / len(values)
+        max_rain_mm = max(values)
+        wet_station_count = sum(value > 0 for value in values)
+        total_station_count = len(values)
+        wet_station_share = wet_station_count / total_station_count
+        is_raining = max_rain_mm > 0
+
+        zone_rows.append([
+            zone_name,
+            reading_time,
+            round(avg_rain_mm, 3),
+            reading_label_from_mm(avg_rain_mm),
+            round(max_rain_mm, 3),
+            wet_station_count,
+            total_station_count,
+            round(wet_station_share, 3),
+            is_raining,
+            "mean",
+        ])
+
+    zone_rows.sort(key=lambda row: (str(row[1]), row[0]))
     return zone_rows
 
 
@@ -170,7 +250,11 @@ def add_labels_to_station_rows(rows):
 def main():
     sh = open_sheet_by_id(SHEET_ID)
     rainfall_ws = ensure_worksheet(sh, RAIN_SHEET_NAME, RAIN_HEADERS)
-    rainfall_zone_ws = ensure_worksheet(sh, RAIN_ZONE_SHEET_NAME, RAIN_ZONE_HEADERS)
+    rainfall_zone_ws = ensure_worksheet_preserving_rows(
+        sh,
+        RAIN_ZONE_SHEET_NAME,
+        RAIN_ZONE_HEADERS,
+    )
 
     last_ts = get_last_timestamp(rainfall_ws)
     if last_ts:
@@ -185,7 +269,7 @@ def main():
     zone_to_stations = load_zone_to_stations_from_sheet(sh, sheet_name=ZONE_SHEET_NAME)
     station_zone_lookup = build_station_to_zones_map(zone_to_stations)
     zone_rows = aggregate_zone_rainfall(new_rows, station_zone_lookup)
-    print(f"Derived {len(zone_rows)} zone-summed rainfall readings.")
+    print(f"Derived {len(zone_rows)} zone-average rainfall readings.")
 
     if labeled_station_rows:
         append_unique(rainfall_ws, labeled_station_rows, key_cols=RAIN_KEY_COLS)
