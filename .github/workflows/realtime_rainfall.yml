@@ -2,11 +2,12 @@ name: sg-weather-sheets-telebot (realtime_rainfall)
 
 on:
   workflow_dispatch:
-  # schedule:
-  #  - cron: "*/5 * * * *"   # best‑effort every 5 minutes (UTC)
+  repository_dispatch:
+    types:
+      - trigger-realtime-rainfall
 
 concurrency:
-  group: weather-prod
+  group: realtime-rainfall-prod
   cancel-in-progress: false
 
 jobs:
