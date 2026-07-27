@@ -21,7 +21,6 @@ RAIN_SHEET_NAME = os.getenv(
     "RAIN_SHEET_NAME",
     "rainfall_data",
 )
-
 RAIN_HEADERS = [
     "station_id",
     "station_name",
@@ -31,7 +30,6 @@ RAIN_HEADERS = [
     "reading_time",
     "reading_label",
 ]
-
 RAIN_KEY_COLS = [
     "station_id",
     "reading_time",
@@ -55,8 +53,10 @@ RAIN_ZONE_HEADERS = [
     "wet_station_share",
     "is_raining",
     "aggregation_method",
+    "tod_label",
+    "cumulative_tod_avg_mm",
+    "cumulative_all_day_avg_mm",
 ]
-
 RAIN_ZONE_KEY_COLS = [
     "zone_name",
     "reading_time",
@@ -67,13 +67,28 @@ ZONE_SHEET_NAME = os.getenv(
     "zone_station_map",
 )
 
+# (label, starting hour >=, ending hour <)
+TIME_OF_DAY_ORDER = [
+    ("Late Night (00:00 - 05:59)", 0, 6),
+    ("Breakfast (06:00 - 09:59)", 6, 10),
+    ("Lunch (10:00 - 13:59)", 10, 14),
+    ("Teabreak (14:00 - 16:59)", 14, 17),
+    ("Dinner (17:00 - 20:59)", 17, 21),
+    ("Supper (21:00 - 23:59)", 21, 24),
+]
 
-def ensure_worksheet_preserving_rows(sh, title, headers):
+
+def ensure_worksheet_preserving_rows(
+    sh,
+    title,
+    headers,
+):
     """
-    Create the worksheet if it does not exist.
+    Create a worksheet, or safely add new trailing
+    headers to an existing worksheet.
 
-    If new columns are added to an existing worksheet,
-    add the headers without deleting its existing rows.
+    The existing rainfall history will not be cleared
+    when new columns are added.
     """
     ws = next(
         (
@@ -108,17 +123,19 @@ def ensure_worksheet_preserving_rows(sh, title, headers):
     if existing_headers == headers:
         return ws
 
-    # Only allow new columns to be added at the end.
-    # Stop if existing columns were renamed or reordered.
-    if existing_headers != headers[: len(existing_headers)]:
+    # Only allow new columns to be added to the end.
+    # This prevents existing data from becoming
+    # misaligned if older columns were renamed or moved.
+    if existing_headers != headers[:len(existing_headers)]:
         raise RuntimeError(
             f"Unexpected headers in '{title}': "
-            f"{existing_headers}. Expected the existing "
-            f"headers to be the start of: {headers}"
+            f"{existing_headers}. "
+            f"Expected the existing headers to be "
+            f"the start of: {headers}"
         )
 
     for column_number, header in enumerate(
-        headers[len(existing_headers) :],
+        headers[len(existing_headers):],
         start=len(existing_headers) + 1,
     ):
         ws.update_cell(
@@ -130,22 +147,18 @@ def ensure_worksheet_preserving_rows(sh, title, headers):
     return ws
 
 
-def delete_rows_in_groups(ws, row_numbers):
+def delete_rows_in_groups(
+    ws,
+    row_numbers,
+):
     """
-    Delete worksheet rows from the bottom upward.
+    Delete non-adjacent worksheet rows safely.
 
-    Google Sheets does not allow deleting every non-frozen row,
-    so add one spare empty row when the deletion reaches the
-    worksheet's final physical row.
+    Rows are grouped and deleted from the bottom upward
+    so earlier row numbers do not shift.
     """
     if not row_numbers:
         return
-
-    row_numbers = sorted(set(row_numbers))
-
-    # Keep one spare row in the worksheet.
-    if row_numbers[-1] >= ws.row_count:
-        ws.add_rows(1)
 
     groups = []
     group_start = row_numbers[0]
@@ -154,24 +167,31 @@ def delete_rows_in_groups(ws, row_numbers):
     for row_number in row_numbers[1:]:
         if row_number == group_end + 1:
             group_end = row_number
-        else:
-            groups.append((group_start, group_end))
-            group_start = row_number
-            group_end = row_number
+            continue
 
-    groups.append((group_start, group_end))
+        groups.append(
+            (group_start, group_end)
+        )
+        group_start = row_number
+        group_end = row_number
 
-    # Delete bottom-up so row positions remain correct.
+    groups.append(
+        (group_start, group_end)
+    )
+
     for start_row, end_row in reversed(groups):
-        ws.delete_rows(start_row, end_row)
+        ws.delete_rows(
+            start_row,
+            end_row,
+        )
+
 
 def prune_to_rolling_two_days(ws):
     """
-    Keep only yesterday (D-1) and today (D-day),
-    based on Singapore time.
+    Keep only yesterday and today based on
+    Singapore time.
 
-    Rows with a blank or invalid reading_time are
-    left untouched to avoid accidental deletion.
+    Blank or unparseable timestamps are not deleted.
     """
     values = ws.get_all_values()
 
@@ -182,24 +202,17 @@ def prune_to_rolling_two_days(ws):
 
     if "reading_time" not in headers:
         raise RuntimeError(
-            f"Worksheet '{ws.title}' "
-            "has no reading_time column."
+            f"Worksheet '{ws.title}' has no "
+            f"reading_time column."
         )
 
     time_idx = headers.index("reading_time")
-
     today = dt.datetime.now(SGT).date()
     yesterday = today - dt.timedelta(days=1)
 
-    dates_to_keep = {
-        yesterday,
-        today,
-    }
-
     rows_to_delete = []
 
-    # Google Sheets rows start from 1.
-    # Row 1 contains the headers.
+    # Google Sheets uses row 1 for headers.
     for sheet_row_number, row in enumerate(
         values[1:],
         start=2,
@@ -207,12 +220,17 @@ def prune_to_rolling_two_days(ws):
         if len(row) <= time_idx:
             continue
 
-        reading_ts = to_dt(row[time_idx])
+        reading_ts = to_dt(
+            row[time_idx]
+        )
 
         if not reading_ts:
             continue
 
-        if reading_ts.date() not in dates_to_keep:
+        if reading_ts.date() not in {
+            yesterday,
+            today,
+        }:
             rows_to_delete.append(
                 sheet_row_number
             )
@@ -246,47 +264,75 @@ def reading_label_from_mm(value):
     return "No Rain"
 
 
-def collect_latest_rainfall(sh):
+def collect_today_rainfall(sh):
     """
-    Fetch only the newest realtime rainfall bucket.
+    Fetch every available five-minute rainfall reading
+    for the current Singapore date.
 
-    This does not use the latest timestamp in Google Sheets
-    as a historical start date. Therefore, an old record in
-    the Sheet cannot trigger a months-long backfill.
+    Even if GitHub runs every 10 minutes, this retrieves
+    every available API bucket:
+
+    :00, :05, :10, :15 ... :55
+
+    append_unique() later prevents previously stored
+    station/timestamp combinations from being duplicated.
     """
-    rainfall_value, _ = run_rainfall(sh)
+    today = dt.datetime.now(SGT).date()
 
-    parsed_rows = []
+    rainfall_value, _ = run_rainfall(
+        sh,
+        today.isoformat(),
+    )
+
+    rows_by_key = {}
 
     for row in rainfall_value or []:
         if len(row) < 6:
             continue
 
-        reading_ts = to_dt(row[5])
+        station_id = str(
+            row[0]
+        ).strip()
 
-        if reading_ts:
-            parsed_rows.append(
-                (reading_ts, row)
-            )
+        reading_ts = to_dt(
+            row[5]
+        )
 
-    if not parsed_rows:
-        return []
+        if not station_id:
+            continue
 
-    latest_api_ts = max(
-        reading_ts
-        for reading_ts, _ in parsed_rows
-    )
+        if not reading_ts:
+            continue
 
-    latest_rows = [
+        if reading_ts.date() != today:
+            continue
+
+        # Keep only one row per station and
+        # five-minute timestamp.
+        rows_by_key[
+            (station_id, reading_ts)
+        ] = row
+
+    return [
         row
-        for reading_ts, row in parsed_rows
-        if reading_ts == latest_api_ts
+        for (_, _), row in sorted(
+            rows_by_key.items(),
+            key=lambda item: (
+                item[0][1],
+                item[0][0],
+            ),
+        )
     ]
 
-    return latest_rows
 
+def build_station_to_zones_map(
+    zone_to_stations,
+):
+    """
+    Reverse the zone-to-station mapping into:
 
-def build_station_to_zones_map(zone_to_stations):
+    station_id -> list of zones
+    """
     station_lookup = {}
 
     for zone_name, stations in (
@@ -296,15 +342,15 @@ def build_station_to_zones_map(zone_to_stations):
             continue
 
         for station_id in stations or []:
-            station_id_string = str(
+            station_id = str(
                 station_id
             ).strip()
 
-            if not station_id_string:
+            if not station_id:
                 continue
 
             station_lookup.setdefault(
-                station_id_string,
+                station_id,
                 set(),
             ).add(zone_name)
 
@@ -315,25 +361,80 @@ def build_station_to_zones_map(zone_to_stations):
     }
 
 
+def get_time_of_day_label(
+    reading_ts,
+):
+    """
+    Return the TOD label corresponding to the
+    reading's Singapore hour.
+    """
+    for (
+        tod_label,
+        start_hour,
+        end_hour,
+    ) in TIME_OF_DAY_ORDER:
+        if (
+            start_hour
+            <= reading_ts.hour
+            < end_hour
+        ):
+            return tod_label
+
+    return "Unknown"
+
+
 def aggregate_zone_rainfall(
     rows,
     station_zone_lookup,
 ):
-    if not rows or not station_zone_lookup:
+    """
+    Calculate zone rainfall for every five-minute
+    timestamp.
+
+    reading_value:
+        Average of the station readings for the
+        latest five-minute timestamp.
+
+    cumulative_tod_avg_mm:
+        Sum each station's readings since the start
+        of the current TOD, then average the station
+        totals within the zone.
+
+    cumulative_all_day_avg_mm:
+        Sum each station's readings since 00:00,
+        then average the station totals within
+        the zone.
+    """
+    if not rows:
         return []
 
-    # Keep one value per station for each
-    # zone and reading timestamp.
+    if not station_zone_lookup:
+        return []
+
+    # Structure:
+    #
+    # (zone, timestamp)
+    #     -> {
+    #          station_id: reading_value
+    #        }
+    #
+    # Using one value per station prevents duplicate
+    # API rows or duplicate mappings from affecting
+    # the calculation.
     readings_by_zone: Dict[
-        Tuple[str, str],
+        Tuple[str, dt.datetime],
         Dict[str, float],
     ] = {}
+
+    original_reading_times = {}
 
     for row in rows:
         if len(row) < 6:
             continue
 
-        station_id = str(row[0]).strip()
+        station_id = str(
+            row[0]
+        ).strip()
 
         if not station_id:
             continue
@@ -345,7 +446,12 @@ def aggregate_zone_rainfall(
         if not zones:
             continue
 
-        reading_time = row[5]
+        reading_ts = to_dt(
+            row[5]
+        )
+
+        if not reading_ts:
+            continue
 
         try:
             reading_value = float(
@@ -357,7 +463,7 @@ def aggregate_zone_rainfall(
         for zone_name in zones:
             key = (
                 zone_name,
-                reading_time,
+                reading_ts,
             )
 
             readings_by_zone.setdefault(
@@ -365,13 +471,40 @@ def aggregate_zone_rainfall(
                 {},
             )[station_id] = reading_value
 
+            original_reading_times[key] = row[5]
+
     zone_rows = []
 
+    # Running station totals for each TOD.
+    #
+    # Key:
+    # (zone, date, TOD label)
+    #
+    # Value:
+    # {station_id: cumulative rainfall}
+    cumulative_tod_station_totals = {}
+
+    # Running station totals for the whole day.
+    #
+    # Key:
+    # (zone, date)
+    #
+    # Value:
+    # {station_id: cumulative rainfall}
+    cumulative_day_station_totals = {}
+
+    # Sorting by timestamp is important because the
+    # cumulative totals must be built chronologically.
     for (
         zone_name,
-        reading_time,
-    ), station_readings in readings_by_zone.items():
-
+        reading_ts,
+    ), station_readings in sorted(
+        readings_by_zone.items(),
+        key=lambda item: (
+            item[0][1],
+            item[0][0],
+        ),
+    ):
         values = list(
             station_readings.values()
         )
@@ -379,8 +512,60 @@ def aggregate_zone_rainfall(
         if not values:
             continue
 
+        tod_label = get_time_of_day_label(
+            reading_ts
+        )
+
+        tod_key = (
+            zone_name,
+            reading_ts.date(),
+            tod_label,
+        )
+
+        day_key = (
+            zone_name,
+            reading_ts.date(),
+        )
+
+        tod_station_totals = (
+            cumulative_tod_station_totals.setdefault(
+                tod_key,
+                {},
+            )
+        )
+
+        day_station_totals = (
+            cumulative_day_station_totals.setdefault(
+                day_key,
+                {},
+            )
+        )
+
+        # Sum rainfall separately for every station.
+        for (
+            station_id,
+            reading_value,
+        ) in station_readings.items():
+            tod_station_totals[station_id] = (
+                tod_station_totals.get(
+                    station_id,
+                    0.0,
+                )
+                + reading_value
+            )
+
+            day_station_totals[station_id] = (
+                day_station_totals.get(
+                    station_id,
+                    0.0,
+                )
+                + reading_value
+            )
+
+        # Latest five-minute zone average.
         avg_rain_mm = (
-            sum(values) / len(values)
+            sum(values)
+            / len(values)
         )
 
         max_rain_mm = max(values)
@@ -399,22 +584,54 @@ def aggregate_zone_rainfall(
 
         is_raining = max_rain_mm > 0
 
-        zone_rows.append(
-            [
-                zone_name,
-                reading_time,
-                round(avg_rain_mm, 3),
-                reading_label_from_mm(
-                    avg_rain_mm
-                ),
-                round(max_rain_mm, 3),
-                wet_station_count,
-                total_station_count,
-                round(wet_station_share, 3),
-                is_raining,
-                "mean",
-            ]
+        # Sum each station within the current TOD,
+        # then average those cumulative station totals.
+        cumulative_tod_avg_mm = (
+            sum(
+                tod_station_totals.values()
+            )
+            / len(tod_station_totals)
         )
+
+        # Sum each station since 00:00,
+        # then average those cumulative station totals.
+        cumulative_all_day_avg_mm = (
+            sum(
+                day_station_totals.values()
+            )
+            / len(day_station_totals)
+        )
+
+        reading_time = original_reading_times[
+            (
+                zone_name,
+                reading_ts,
+            )
+        ]
+
+        zone_rows.append([
+            zone_name,
+            reading_time,
+            round(avg_rain_mm, 3),
+            reading_label_from_mm(
+                avg_rain_mm
+            ),
+            round(max_rain_mm, 3),
+            wet_station_count,
+            total_station_count,
+            round(wet_station_share, 3),
+            is_raining,
+            "mean",
+            tod_label,
+            round(
+                cumulative_tod_avg_mm,
+                3,
+            ),
+            round(
+                cumulative_all_day_avg_mm,
+                3,
+            ),
+        ])
 
     zone_rows.sort(
         key=lambda row: (
@@ -427,7 +644,11 @@ def aggregate_zone_rainfall(
 
 
 def add_labels_to_station_rows(rows):
-    labeled_rows = []
+    """
+    Add a rainfall severity label to each individual
+    station reading.
+    """
+    labeled = []
 
     for row in rows:
         if len(row) < 6:
@@ -444,11 +665,11 @@ def add_labels_to_station_rows(rows):
             value
         )
 
-        labeled_rows.append(
+        labeled.append(
             row + [label]
         )
 
-    return labeled_rows
+    return labeled
 
 
 def main():
@@ -472,7 +693,7 @@ def main():
         )
     )
 
-    # Delete D-2 and older records from both tabs.
+    # Retain only yesterday and today.
     deleted_station_rows = (
         prune_to_rolling_two_days(
             rainfall_ws
@@ -487,18 +708,29 @@ def main():
 
     print(
         "Rolling two-day cleanup removed "
-        f"{deleted_station_rows} station rows "
-        f"and {deleted_zone_rows} zone rows."
+        f"{deleted_station_rows} station rows and "
+        f"{deleted_zone_rows} zone rows."
     )
 
-    # Fetch only the newest current rainfall reading.
-    new_rows = collect_latest_rainfall(
+    # Retrieve every available five-minute bucket
+    # for today.
+    new_rows = collect_today_rainfall(
         sh
     )
 
+    timestamps = {
+        to_dt(row[5])
+        for row in new_rows
+        if (
+            len(row) >= 6
+            and to_dt(row[5])
+        )
+    }
+
     print(
-        f"Fetched {len(new_rows)} readings "
-        "from the latest realtime bucket."
+        f"Fetched {len(new_rows)} station readings "
+        f"across {len(timestamps)} five-minute "
+        f"buckets for today."
     )
 
     labeled_station_rows = (
@@ -527,11 +759,11 @@ def main():
 
     print(
         f"Derived {len(zone_rows)} "
-        "zone-average rainfall readings."
+        f"zone-average rainfall readings."
     )
 
-    # append_unique prevents the same
-    # station/timestamp from being inserted twice.
+    # append_unique prevents the previously captured
+    # station/timestamp rows from being inserted again.
     if labeled_station_rows:
         append_unique(
             rainfall_ws,
@@ -543,11 +775,11 @@ def main():
         )
     else:
         print(
-            "Nothing new to append "
-            "to rainfall sheet."
+            "Nothing new to append to "
+            "rainfall sheet."
         )
 
-    # Prevent duplicate zone/timestamp rows.
+    # One unique row per zone and timestamp.
     if zone_rows:
         append_unique(
             rainfall_zone_ws,
@@ -559,8 +791,8 @@ def main():
         )
     else:
         print(
-            "Nothing new to append "
-            "to zone rainfall sheet."
+            "Nothing new to append to "
+            "zone rainfall sheet."
         )
 
 
