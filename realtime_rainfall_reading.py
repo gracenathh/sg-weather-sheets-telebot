@@ -85,7 +85,7 @@ ZONE_SHEET_NAME = os.getenv(
 # Use True once for checking yesterday's values.
 # Change to False after the backfill is verified.
 #
-BACKFILL_YESTERDAY = True
+BACKFILL_YESTERDAY = False
 
 
 # (label, starting hour >=, ending hour <)
