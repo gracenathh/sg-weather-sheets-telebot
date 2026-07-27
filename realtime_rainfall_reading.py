@@ -830,28 +830,29 @@ def replace_dates_sort_and_write(
         )
 
     # Rewrite the worksheet after merge/deduplication/sort.
+    # Rewrite the worksheet after merge/deduplication/sort.
     ws.clear()
-
-    ws.append_row(
-        headers,
-        value_input_option="USER_ENTERED",
-    )
-
-    # Write in batches to reduce Google Sheets API calls.
+    
+    # Include the header in the first bulk write.
+    rows_to_write = [headers,] + merged_rows
+    
+    # 5,000 rows per request keeps the number of write
+    # requests comfortably below Google's per-minute quota.
+    WRITE_BATCH_SIZE = 5000
+    
     for start in range(
         0,
-        len(merged_rows),
-        500,
+        len(rows_to_write),
+        WRITE_BATCH_SIZE,
     ):
         ws.append_rows(
-            merged_rows[
-                start:start + 500
+            rows_to_write[
+                start:start + WRITE_BATCH_SIZE
             ],
             value_input_option="USER_ENTERED",
         )
-
+    
     return len(merged_rows)
-
 
 def main():
     sh = open_sheet_by_id(
