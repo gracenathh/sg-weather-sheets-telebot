@@ -1,0 +1,50 @@
+name: Refresh 24-hour forecast holder
+
+on:
+  schedule:
+    # GitHub cron is UTC. Singapore is UTC+8 year-round.
+    # 15:35 UTC = 23:35 SGT (next-day lunch decision)
+    # 21:35 UTC = 05:35 SGT (same-day dinner decision)
+    - cron: "35 15,21 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forecast-24h-holder
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create Google service-account file
+        env:
+          GCP_SHEETS_KEY_JSON: ${{ secrets.GCP_SHEETS_KEY_JSON }}
+        run: |
+          test -n "$GCP_SHEETS_KEY_JSON"
+          printf '%s' "$GCP_SHEETS_KEY_JSON" > "$RUNNER_TEMP/google-service-account.json"
+
+      - name: Refresh forecast_24h sheet
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/google-service-account.json
+          SHEET_ID: ${{ vars.SHEET_ID }}
+          DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+        run: |
+          test -n "$SHEET_ID"
+          python forecast_24h_holder.py
