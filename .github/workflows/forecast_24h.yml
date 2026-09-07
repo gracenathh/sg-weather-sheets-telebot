@@ -3,10 +3,25 @@ name: Refresh 24-hour forecast holder
 on:
   schedule:
     # GitHub cron is UTC. Singapore is UTC+8 year-round.
-    # 15:35 UTC = 23:35 SGT (next-day lunch decision)
-    # 21:35 UTC = 05:35 SGT (same-day dinner decision)
-    - cron: "35 15,21 * * *"
-  workflow_dispatch: {}
+    # 15:30 UTC = 23:30 SGT (next-day lunch decision)
+    # 21:30 UTC = 05:30 SGT (same-day dinner decision)
+    - cron: "30 15 * * *"
+    - cron: "30 21 * * *"
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: Campaign to preview or send
+        required: true
+        default: lunch
+        type: choice
+        options:
+          - lunch
+          - dinner
+      send_live:
+        description: Send live instead of performing a dry run
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -40,11 +55,28 @@ jobs:
           test -n "$GCP_SHEETS_KEY_JSON"
           printf '%s' "$GCP_SHEETS_KEY_JSON" > "$RUNNER_TEMP/google-service-account.json"
 
-      - name: Refresh forecast_24h sheet
+      - name: Refresh forecast_24h and notify Telegram
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/google-service-account.json
           SHEET_ID: ${{ vars.SHEET_ID }}
           DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_CAMPAIGN: ${{ inputs.campaign }}
+          MANUAL_SEND_LIVE: ${{ inputs.send_live }}
         run: |
-          test -n "$SHEET_ID"
-          python forecast_24h_holder.py
+          if [ "$EVENT_SCHEDULE" = "30 15 * * *" ]; then
+            campaign="lunch"
+          elif [ "$EVENT_SCHEDULE" = "30 21 * * *" ]; then
+            campaign="dinner"
+          else
+            campaign="$MANUAL_CAMPAIGN"
+          fi
+
+          args=(--campaign "$campaign")
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_SEND_LIVE" != "true" ]; then
+            args+=(--dry-run)
+          fi
+          python forecast_24h_holder.py --notify "${args[@]}"
