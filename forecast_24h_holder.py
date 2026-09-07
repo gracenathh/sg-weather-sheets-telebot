@@ -25,6 +25,7 @@ load_dotenv()
 SGT = dt.timezone(dt.timedelta(hours=8))
 URL = "https://api-open.data.gov.sg/v2/real-time/api/twenty-four-hr-forecast"
 SHEET_NAME = os.getenv("FORECAST_24H_SHEET_NAME", "forecast_24h")
+COMMS_LOG_SHEET = os.getenv("FORECAST_24H_COMMS_LOG_SHEET", "forecast_24h_comms_log")
 REGIONS = ("south", "north", "east", "west")
 HEADERS = [
     "date",
@@ -45,6 +46,11 @@ HEADERS = [
     "north_code",
     "east_code",
     "west_code",
+]
+COMMS_LOG_HEADERS = [
+    "notification_key", "campaign", "campaign_date", "forecast_issued_ts",
+    "forecast_updated_ts", "message", "telegram_chat_id",
+    "telegram_message_id", "sent_at",
 ]
 
 
@@ -414,17 +420,103 @@ def run_24h_forecast_holder(sh, today=None):
     return combined
 
 
+def target_date_for(campaign, now):
+    if campaign == "dinner":
+        return now.date()
+    # Preserve the intended date if the 23:30 job is delayed past midnight.
+    return now.date() + dt.timedelta(days=1) if now.hour >= 12 else now.date()
+
+
+def decision_cutoff(campaign, target_date):
+    if campaign == "lunch":
+        return dt.datetime.combine(target_date - dt.timedelta(days=1), dt.time(23, 30), SGT)
+    return dt.datetime.combine(target_date, dt.time(5, 30), SGT)
+
+
+def select_latest_campaign_row(rows, campaign, target_date):
+    expected_use = "lunch_block_2" if campaign == "lunch" else "dinner"
+    cutoff = decision_cutoff(campaign, target_date)
+    candidates = []
+    for row in rows:
+        record = dict(zip(HEADERS, row))
+        if str(record.get("campaign_use", "")).strip() != expected_use:
+            continue
+        period_start = parse_datetime(record.get("period_start"))
+        available = parse_datetime(record.get("updated_ts")) or parse_datetime(record.get("issued_ts"))
+        if not period_start or not available:
+            continue
+        if period_start.date() == target_date and available <= cutoff:
+            candidates.append((available, record))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def send_telegram(token, chat_id, message):
+    response = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": message}, timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"Telegram rejected the message: {payload}")
+    return payload["result"].get("message_id", "")
+
+
+def send_campaign_comms(sh, rows, campaign, dry_run=False, now=None):
+    now = now or dt.datetime.now(SGT)
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not dry_run and (not token or not chat_id):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
+
+    target_date = target_date_for(campaign, now)
+    selected = select_latest_campaign_row(rows, campaign, target_date)
+    if selected is None:
+        print(f"{campaign} {target_date}: no eligible forecast row; nothing sent")
+        return "no_forecast"
+    message = str(selected.get("campaign_comms", "")).strip()
+    if not message:
+        print(f"{campaign} {target_date}: latest forecast has no comms; nothing sent")
+        return "no_comms"
+
+    notification_key = f"{campaign}:{target_date.isoformat()}"
+    log_ws = ensure_worksheet(sh, COMMS_LOG_SHEET, COMMS_LOG_HEADERS)
+    log_values = log_ws.get_all_values()
+    if notification_key in {row[0] for row in log_values[1:] if row}:
+        print(f"{notification_key}: already sent; nothing sent")
+        return "duplicate"
+    if dry_run:
+        print(f"DRY RUN {notification_key}: {message}")
+        return "dry_run"
+https://github.com/gracenathh/sg-weather-sheets-telebot/blob/main/forecast_24h_holder.py
+    message_id = send_telegram(token, chat_id, message)
+    log_ws.append_row([
+        notification_key, campaign, target_date.isoformat(),
+        selected.get("issued_ts", ""), selected.get("updated_ts", ""),
+        message, chat_id, message_id, now.isoformat(),
+    ], value_input_option="USER_ENTERED")
+    print(f"{notification_key}: sent Telegram message {message_id}")
+    return "sent"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sheet-id", default=os.getenv("SHEET_ID"))
+    parser.add_argument("--notify", action="store_true")
+    parser.add_argument("--campaign", choices=("lunch", "dinner"))
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if not args.sheet_id:
         raise SystemExit("SHEET_ID is required")
+    if args.notify and not args.campaign:
+        raise SystemExit("--campaign is required when --notify is used")
 
     from consolidate import open_sheet_by_id
 
     sh = open_sheet_by_id(args.sheet_id)
-    run_24h_forecast_holder(sh)
+    rows = run_24h_forecast_holder(sh)
+    if args.notify:
+        send_campaign_comms(sh, rows, args.campaign, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
