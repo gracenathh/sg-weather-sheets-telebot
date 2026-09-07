@@ -6,3 +6,4 @@ gspread>=6.0
 google-auth>=2.35
 google-auth-oauthlib>=1.2
 shapely>=2.0
+openai>=1.51.0
