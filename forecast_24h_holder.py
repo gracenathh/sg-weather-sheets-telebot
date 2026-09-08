@@ -521,7 +521,28 @@ def main():
     if not args.sheet_id:
         raise SystemExit("SHEET_ID is required")
     if args.notify and not args.campaign:
+        raise SystemExit("--campaign is required when --notify is used")
 
+    from consolidate import open_sheet_by_id
+
+    sh = open_sheet_by_id(args.sheet_id)
+    if args.skip_refresh:
+        if not args.notify:
+            raise SystemExit("--skip-refresh is only valid with --notify")
+        values = sh.worksheet(SHEET_NAME).get_all_values()
+        if not values or values[0] != HEADERS:
+            raise RuntimeError(f"{SHEET_NAME} does not have the expected columns")
+        rows = [row + [""] * (len(HEADERS) - len(row)) for row in values[1:] if row]
+    else:
+        rows = run_24h_forecast_holder(sh)
+    if args.notify:
+        send_campaign_comms(
+            sh,
+            rows,
+            args.campaign,
+            dry_run=args.dry_run,
+            target_date=args.target_date,
+        )
 
 
 if __name__ == "__main__":
