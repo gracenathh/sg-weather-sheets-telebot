@@ -34,6 +34,12 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Check out repository
@@ -48,20 +54,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Create Google service-account file
+      - name: Write service account JSON
         env:
-          GCP_SHEETS_KEY_JSON: ${{ secrets.GCP_SHEETS_KEY_JSON }}
+          SA_JSON: ${{ secrets.SA_JSON }}
         run: |
-          test -n "$GCP_SHEETS_KEY_JSON"
-          printf '%s' "$GCP_SHEETS_KEY_JSON" > "$RUNNER_TEMP/google-service-account.json"
+          test -n "$SA_JSON"
+          printf '%s' "$SA_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Sanity check JSON
+        run: |
+          python - <<'PY'
+          import json, os
+          path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+          with open(path, encoding="utf-8") as handle:
+              json.load(handle)
+          print("Service account JSON OK at:", path)
+          PY
 
       - name: Refresh forecast_24h and notify Telegram
         env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/google-service-account.json
-          SHEET_ID: ${{ vars.SHEET_ID }}
-          DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
           MANUAL_CAMPAIGN: ${{ inputs.campaign }}
@@ -80,3 +91,7 @@ jobs:
             args+=(--dry-run)
           fi
           python forecast_24h_holder.py --notify "${args[@]}"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
