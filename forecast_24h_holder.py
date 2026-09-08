@@ -462,14 +462,16 @@ def send_telegram(token, chat_id, message):
     return payload["result"].get("message_id", "")
 
 
-def send_campaign_comms(sh, rows, campaign, dry_run=False, now=None):
+def send_campaign_comms(
+    sh, rows, campaign, dry_run=False, now=None, target_date=None
+):
     now = now or dt.datetime.now(SGT)
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not dry_run and (not token or not chat_id):
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
 
-    target_date = target_date_for(campaign, now)
+    target_date = target_date or target_date_for(campaign, now)
     selected = select_latest_campaign_row(rows, campaign, target_date)
     if selected is None:
         print(f"{campaign} {target_date}: no eligible forecast row; nothing sent")
@@ -488,7 +490,7 @@ def send_campaign_comms(sh, rows, campaign, dry_run=False, now=None):
     if dry_run:
         print(f"DRY RUN {notification_key}: {message}")
         return "dry_run"
-https://github.com/gracenathh/sg-weather-sheets-telebot/blob/main/forecast_24h_holder.py
+
     message_id = send_telegram(token, chat_id, message)
     log_ws.append_row([
         notification_key, campaign, target_date.isoformat(),
@@ -504,19 +506,22 @@ def main():
     parser.add_argument("--sheet-id", default=os.getenv("SHEET_ID"))
     parser.add_argument("--notify", action="store_true")
     parser.add_argument("--campaign", choices=("lunch", "dinner"))
+    parser.add_argument(
+        "--target-date",
+        type=dt.date.fromisoformat,
+        help="Override the campaign date (YYYY-MM-DD), mainly for testing",
+    )
+    parser.add_argument(
+        "--skip-refresh",
+        action="store_true",
+        help="Use rows already in forecast_24h instead of calling the NEA API",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if not args.sheet_id:
         raise SystemExit("SHEET_ID is required")
     if args.notify and not args.campaign:
-        raise SystemExit("--campaign is required when --notify is used")
 
-    from consolidate import open_sheet_by_id
-
-    sh = open_sheet_by_id(args.sheet_id)
-    rows = run_24h_forecast_holder(sh)
-    if args.notify:
-        send_campaign_comms(sh, rows, args.campaign, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
