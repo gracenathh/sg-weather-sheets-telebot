@@ -1,8 +1,8 @@
 """Maintain a readable, rolling 24-hour forecast worksheet.
 
 The worksheet stores one row per forecast vintage and six-hour period, with
-South/North/East/West shown side by side. Existing rows are used as the local
-checkpoint, and only the latest checkpoint date onward is fetched again.
+South/North/East/West shown side by side. On regular runs, yesterday and today
+are replaced from the API so late forecast revisions are captured.
 """
 
 from __future__ import annotations
@@ -279,6 +279,17 @@ def retain_recent_rows(rows, cutoff_date):
     return retained
 
 
+def exclude_issued_on_or_after(rows, start_date):
+    """Keep rows older than the refresh window, based on forecast issue time."""
+    issued_idx = HEADERS.index("issued_ts")
+    retained = []
+    for row in rows:
+        issued = parse_datetime(row[issued_idx])
+        if issued and issued.date() < start_date:
+            retained.append(row)
+    return retained
+
+
 def deduplicate(rows):
     # A period can be corrected without changing its issued timestamp, so keep
     # the row with the latest updated timestamp for each issue + period.
@@ -387,10 +398,15 @@ def run_24h_forecast_holder(sh, today=None):
         original_values = ws.get_all_values()
 
     existing_rows = migrate_legacy_rows(original_values)
-    checkpoint = latest_issued_date([HEADERS, *existing_rows])
     # On the first migration, begin at the first day two calendar months ago.
     # For 2026-09 this is 2026-07-01, as requested. Retention still allows L3M.
-    start_date = checkpoint or first_day_months_ago(today, 2)
+    # Once initialized, always replace yesterday and today so revisions to
+    # either API date do not leave stale forecast vintages in the sheet.
+    start_date = (
+        today - dt.timedelta(days=1)
+        if existing_rows
+        else first_day_months_ago(today, 2)
+    )
     start_date = max(start_date, cutoff_date)
 
     fetched_rows = []
@@ -401,13 +417,15 @@ def run_24h_forecast_holder(sh, today=None):
         except RuntimeError as exc:
             failures.append(str(exc))
 
-    combined = deduplicate(retain_recent_rows(existing_rows + fetched_rows, cutoff_date))
-    combined = keep_only_cutoff_communications(combined)
     if failures:
         raise RuntimeError(
             f"24h forecast refresh aborted without changing the sheet; "
             f"{len(failures)} date(s) failed. First error: {failures[0]}"
         )
+
+    preserved_rows = exclude_issued_on_or_after(existing_rows, start_date)
+    combined = deduplicate(retain_recent_rows(preserved_rows + fetched_rows, cutoff_date))
+    combined = keep_only_cutoff_communications(combined)
 
     # One atomic-style rewrite keeps the rolling retention rule simple and
     # prevents the header migration from leaving a half-written worksheet.
@@ -547,3 +565,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
