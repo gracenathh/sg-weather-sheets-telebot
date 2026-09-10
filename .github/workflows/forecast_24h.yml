@@ -5,8 +5,8 @@ on:
     # GitHub cron is UTC. Singapore is UTC+8 year-round.
     # 15:30 UTC = 23:30 SGT (next-day lunch decision)
     # 21:30 UTC = 05:30 SGT (same-day dinner decision)
-    - cron: "30 15 * * *"
-    - cron: "30 21 * * *"
+    - cron: "30 3 * * *"
+    - cron: "30 9 * * *"
   workflow_dispatch:
     inputs:
       campaign:
