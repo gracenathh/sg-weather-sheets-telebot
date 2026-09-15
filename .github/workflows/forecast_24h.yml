@@ -5,8 +5,8 @@ on:
     # GitHub cron is UTC. Singapore is UTC+8 year-round.
     # 15:30 UTC = 23:30 SGT (next-day lunch decision)
     # 21:30 UTC = 05:30 SGT (same-day dinner decision)
-    - cron: "30 3 * * *"
-    - cron: "30 9 * * *"
+    - cron: "30 15 * * *"
+    - cron: "30 21 * * *"
   workflow_dispatch:
     inputs:
       campaign:
@@ -78,13 +78,29 @@ jobs:
           MANUAL_CAMPAIGN: ${{ inputs.campaign }}
           MANUAL_SEND_LIVE: ${{ inputs.send_live }}
         run: |
-          if [ "$EVENT_SCHEDULE" = "30 15 * * *" ]; then
-            campaign="lunch"
-          elif [ "$EVENT_SCHEDULE" = "30 21 * * *" ]; then
-            campaign="dinner"
-          else
-            campaign="$MANUAL_CAMPAIGN"
-          fi
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              # GitHub can expose an empty input when an older workflow run is
+              # re-run. Default to lunch instead of passing --campaign "".
+              campaign="${MANUAL_CAMPAIGN:-lunch}"
+              ;;
+            schedule)
+              case "$EVENT_SCHEDULE" in
+                "30 15 * * *") campaign="lunch" ;;
+                "30 21 * * *") campaign="dinner" ;;
+                *)
+                  echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "Unsupported GitHub event: '$EVENT_NAME'"
+              exit 1
+              ;;
+          esac
+
+          echo "Event: $EVENT_NAME; schedule: ${EVENT_SCHEDULE:-none}; campaign: $campaign"
 
           args=(--campaign "$campaign")
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_SEND_LIVE" != "true" ]; then
