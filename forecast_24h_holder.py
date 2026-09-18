@@ -1042,8 +1042,8 @@ def keep_only_cutoff_communications(
                         )
                     ),
                     dt.time(
-                        23,
-                        30,
+                        20,
+                        0,
                     ),
                     SGT,
                 )
@@ -1059,7 +1059,7 @@ def keep_only_cutoff_communications(
                 dt.datetime.combine(
                     target_date,
                     dt.time(
-                        5,
+                        8,
                         30,
                     ),
                     SGT,
@@ -1503,8 +1503,8 @@ def decision_cutoff(
                 )
             ),
             dt.time(
-                23,
-                30,
+                20,
+                0,
             ),
             SGT,
         )
@@ -1512,7 +1512,7 @@ def decision_cutoff(
     return dt.datetime.combine(
         target_date,
         dt.time(
-            5,
+            8,
             30,
         ),
         SGT,
