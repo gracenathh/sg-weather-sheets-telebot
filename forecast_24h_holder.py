@@ -52,6 +52,7 @@ REGIONS = (
     "north",
     "east",
     "west",
+    "central",
 )
 
 HEADERS = [
@@ -67,12 +68,14 @@ HEADERS = [
     "north_forecast",
     "east_forecast",
     "west_forecast",
+    "central_forecast",
     "thunder_regions",
     "campaign_comms",
     "south_code",
     "north_code",
     "east_code",
     "west_code",
+    "central_code",
 ]
 
 COMMS_LOG_HEADERS = [
@@ -378,31 +381,38 @@ def communication_messages(
     if not regions:
         return ""
 
-    names = [
-        region.title()
-        for region in regions
-    ]
-
-    if len(names) == 1:
-        display_regions = names[0]
-
-    elif len(names) == 2:
-        display_regions = (
-            f"{names[0]} and "
-            f"{names[1]}"
-        )
-
+    if set(regions) == set(REGIONS):
+        location_text = "islandwide"
     else:
-        display_regions = (
-            f"{', '.join(names[:-1])} "
-            f"and {names[-1]}"
-        )
+        names = [
+            region.title()
+            for region in regions
+        ]
 
-    area_word = (
-        "area"
-        if len(regions) == 1
-        else "areas"
-    )
+        if len(names) == 1:
+            display_regions = names[0]
+
+        elif len(names) == 2:
+            display_regions = (
+                f"{names[0]} and "
+                f"{names[1]}"
+            )
+
+        else:
+            display_regions = (
+                f"{', '.join(names[:-1])} "
+                f"and {names[-1]}"
+            )
+
+        area_word = (
+            "area"
+            if len(regions) == 1
+            else "areas"
+        )
+        location_text = (
+            f"in the {display_regions} "
+            f"{area_word}"
+        )
 
     date_text = (
         f" ({campaign_date:%d/%m})"
@@ -412,25 +422,21 @@ def communication_messages(
 
     if kind == "lunch":
         return (
-            f"Rain is forecast around "
+            f"⛈️ Heavy rain is forecast around "
             f"lunchtime tomorrow"
-            f"{date_text} in the "
-            f"{display_regions} "
-            f"{area_word}. "
-            f"Consider bringing your "
-            f"rain jacket if you plan "
-            f"to ride during lunch period!"
+            f"{date_text} "
+            f"{location_text}. "
+            f"Pack a rain jacket just "
+            f"in case! Ride safe!"
         )
 
     if kind == "dinner":
         return (
-            f"Rain is forecast tonight"
-            f"{date_text} in the "
-            f"{display_regions} "
-            f"{area_word}. "
-            f"Consider bringing your "
-            f"rain jacket if you plan "
-            f"to ride during dinner period!"
+            f"⛈️ Heavy rain is forecast tonight"
+            f"{date_text} "
+            f"{location_text}. "
+            f"Pack a rain jacket just "
+            f"in case! Ride safe!"
         )
 
     return ""
@@ -1174,26 +1180,35 @@ def keep_only_cutoff_communications(
 
 def migrate_legacy_rows(values):
     """
-    Accept rows only when the existing worksheet has
-    the expected schema.
+    Map an older worksheet schema into the current one.
+
+    This preserves existing S/N/E/W history when Central columns are first
+    introduced. The normal two-day refresh then populates Central for the
+    operationally relevant recent rows.
     """
 
-    if (
-        not values
-        or values[0]
-        != HEADERS
-    ):
+    if not values:
         return []
 
-    return [
-        row
-        + [""] * (
-            len(HEADERS)
-            - len(row)
-        )
-        for row in values[1:]
-        if row
-    ]
+    old_headers = values[0]
+    required = {
+        "issued_ts",
+        "updated_ts",
+        "period_start",
+    }
+    if not required.issubset(old_headers):
+        return []
+
+    migrated = []
+    for row in values[1:]:
+        if not row:
+            continue
+        record = dict(zip(old_headers, row))
+        migrated.append([
+            record.get(header, "")
+            for header in HEADERS
+        ])
+    return migrated
 
 
 # ============================================================
