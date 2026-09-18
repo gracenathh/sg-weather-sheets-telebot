@@ -1042,7 +1042,7 @@ def keep_only_cutoff_communications(
                         )
                     ),
                     dt.time(
-                        20,
+                        21,
                         0,
                     ),
                     SGT,
@@ -1503,7 +1503,7 @@ def decision_cutoff(
                 )
             ),
             dt.time(
-                20,
+                21,
                 0,
             ),
             SGT,
