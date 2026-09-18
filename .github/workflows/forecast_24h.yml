@@ -3,10 +3,10 @@ name: Refresh 24-hour forecast holder
 on:
   schedule:
     # GitHub cron is UTC. Singapore is UTC+8 year-round.
-    # 15:30 UTC = 23:30 SGT (next-day lunch decision)
-    # 21:30 UTC = 05:30 SGT (same-day dinner decision)
-    - cron: "30 15 * * *"
-    - cron: "30 21 * * *"
+    # 12:00 UTC = 20:00 SGT (next-day lunch message)
+    # 01:00 UTC = 09:00 SGT (same-day dinner message)
+    - cron: "0 12 * * *"
+    - cron: "0 1 * * *"
   workflow_dispatch:
     inputs:
       campaign:
@@ -86,8 +86,8 @@ jobs:
               ;;
             schedule)
               case "$EVENT_SCHEDULE" in
-                "30 15 * * *") campaign="lunch" ;;
-                "30 21 * * *") campaign="dinner" ;;
+                "0 12 * * *") campaign="lunch" ;;
+                "0 1 * * *") campaign="dinner" ;;
                 *)
                   echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
                   exit 1
