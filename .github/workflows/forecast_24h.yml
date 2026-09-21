@@ -3,10 +3,11 @@ name: Refresh 24-hour forecast holder
 on:
   schedule:
     # GitHub cron is UTC. Singapore is UTC+8 year-round.
-    # 13:00 UTC = 21:00 SGT (next-day lunch message)
-    # 01:00 UTC = 09:00 SGT (same-day dinner message)
-    - cron: "0 13 * * *"
-    - cron: "0 1 * * *"
+    # Use :45 to avoid GitHub Actions' busiest top-of-hour scheduling period.
+    # 12:45 UTC = 20:45 SGT (target: around 21:00, next-day lunch)
+    # 00:45 UTC = 08:45 SGT (target: around 09:00, same-day dinner)
+    - cron: "45 12 * * *"
+    - cron: "45 0 * * *"
   workflow_dispatch:
     inputs:
       campaign:
@@ -86,8 +87,8 @@ jobs:
               ;;
             schedule)
               case "$EVENT_SCHEDULE" in
-                "0 13 * * *") campaign="lunch" ;;
-                "0 1 * * *") campaign="dinner" ;;
+                "45 12 * * *") campaign="lunch" ;;
+                "45 0 * * *") campaign="dinner" ;;
                 *)
                   echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
                   exit 1
@@ -103,6 +104,9 @@ jobs:
           echo "Event: $EVENT_NAME; schedule: ${EVENT_SCHEDULE:-none}; campaign: $campaign"
 
           args=(--campaign "$campaign")
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            args+=(--enforce-send-window)
+          fi
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_SEND_LIVE" != "true" ]; then
             args+=(--dry-run)
           fi
