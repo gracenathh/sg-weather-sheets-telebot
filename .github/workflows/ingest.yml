@@ -21,13 +21,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Echo time (UTC)
         run: date -u
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: "pip"
@@ -44,8 +44,11 @@ jobs:
           fi
 
       - name: Write service account JSON
+        env:
+          SA_JSON: ${{ secrets.SA_JSON }}
         run: |
-          echo '${{ secrets.SA_JSON }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+          test -n "$SA_JSON"
+          printf '%s' "$SA_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
 
       - name: Sanity check JSON
         run: |
@@ -79,3 +82,4 @@ jobs:
       - name: Cleanup credentials
         if: always()
         run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
+
