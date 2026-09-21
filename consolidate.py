@@ -18,6 +18,12 @@ SGT = dt.timezone(dt.timedelta(hours=8))
 UA = os.getenv("USER_AGENT", "sg-weather-collector/1.0")
 API_KEY = os.getenv("DATA_GOV_SG_API_KEY")
 SHEET_ID = os.environ["SHEET_ID"]
+API_MAX_RETRIES = max(1, int(os.getenv("API_MAX_RETRIES", "8")))
+METS_WORKERS = max(1, int(os.getenv("METS_WORKERS", "1")))
+METS_PAGE_DELAY_SECONDS = max(
+    0.0,
+    float(os.getenv("METS_PAGE_DELAY_SECONDS", "0.75")),
+)
 TIME_OF_DAY_ORDER = [
     ("Late Night", 0, 6),
     ("Breakfast", 6, 10),
@@ -87,9 +93,56 @@ def _headers():
 
 def fetch_data(url, raw = False, params = None): # raw is only for V1 -- https://api.data.gov.sg/v1/environment/
     params = params or {}
-    requestor = requests.get(url, headers=_headers(), params = params, timeout=30)
-    requestor.raise_for_status()
-    json_ = requestor.json() or {}
+    retryable_statuses = {429, 500, 502, 503, 504}
+    last_error = None
+
+    for attempt in range(API_MAX_RETRIES):
+        requestor = None
+        try:
+            requestor = requests.get(
+                url,
+                headers=_headers(),
+                params=params,
+                timeout=60,
+            )
+
+            if requestor.status_code not in retryable_statuses:
+                requestor.raise_for_status()
+                json_ = requestor.json() or {}
+                break
+
+            requestor.raise_for_status()
+        except (requests.Timeout, requests.ConnectionError, ValueError) as exc:
+            last_error = exc
+        except requests.HTTPError as exc:
+            last_error = exc
+            if exc.response is not None and exc.response.status_code not in retryable_statuses:
+                raise
+
+        if attempt >= API_MAX_RETRIES - 1:
+            raise RuntimeError(
+                f"API request failed after {API_MAX_RETRIES} attempts: {url}"
+            ) from last_error
+
+        retry_after = (
+            requestor.headers.get("Retry-After", "")
+            if requestor is not None
+            else ""
+        )
+        try:
+            retry_after_seconds = float(retry_after)
+        except (TypeError, ValueError):
+            retry_after_seconds = 0.0
+        wait_seconds = max(
+            retry_after_seconds,
+            min(60.0, 2.0 ** attempt),
+        )
+        print(
+            f"API request throttled/temporary failure for {url}; "
+            f"retrying in {wait_seconds:.1f}s "
+            f"(attempt {attempt + 1}/{API_MAX_RETRIES})"
+        )
+        time.sleep(wait_seconds)
 
     if raw:
         return json_
@@ -274,7 +327,9 @@ def fetch_all_mets_rows(base_url, date_str=None):
     next_page = None
 
     while paginationToken != None:
-        
+        if METS_PAGE_DELAY_SECONDS:
+            time.sleep(METS_PAGE_DELAY_SECONDS)
+
         new_url = f"{base_url}?date={date_str}&paginationToken={paginationToken}"
         next_json_data = fetch_data(new_url)
         next_value, next_page = parse_mets_page(next_json_data)
@@ -302,7 +357,9 @@ def run_mets(sh, rainfall_area, date_str=None, write_to_sheet=True):
         "wind_speed":"https://api-open.data.gov.sg/v2/real-time/api/wind-speed"
     }
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # Historical endpoints are paginated and rate-limited. Sequential fetching
+    # is the safe default; METS_WORKERS can be raised through the environment.
+    with ThreadPoolExecutor(max_workers=min(METS_WORKERS, len(urls))) as ex:
         futs = {k: ex.submit(fetch_all_mets_rows, u, date_str) for k, u in urls.items()}
         temperature_rows = futs["temp"].result()
         humidity_rows    = futs["humidity"].result()
