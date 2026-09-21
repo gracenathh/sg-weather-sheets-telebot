@@ -422,7 +422,7 @@ def communication_messages(
 
     if kind == "lunch":
         return (
-            f"⛈️ Heavy rain is forecast around "
+            f"⛈️ NEA forecasts heavy rain around "
             f"lunchtime tomorrow"
             f"{date_text} "
             f"{location_text}. "
@@ -432,7 +432,7 @@ def communication_messages(
 
     if kind == "dinner":
         return (
-            f"⛈️ Heavy rain is forecast tonight"
+            f"⛈️ NEA forecasts heavy rain tonight"
             f"{date_text} "
             f"{location_text}. "
             f"Pack a rain jacket just "
@@ -1490,6 +1490,56 @@ def target_date_for(
     )
 
 
+def useful_send_window(
+    campaign,
+    target_date,
+):
+    """Return the SGT interval in which an alert is still useful."""
+    if campaign == "lunch":
+        earliest = dt.datetime.combine(
+            target_date - dt.timedelta(days=1),
+            dt.time(20, 30),
+            tzinfo=SGT,
+        )
+        latest = dt.datetime.combine(
+            target_date,
+            dt.time(11, 0),
+            tzinfo=SGT,
+        )
+    else:
+        earliest = dt.datetime.combine(
+            target_date,
+            dt.time(8, 30),
+            tzinfo=SGT,
+        )
+        latest = dt.datetime.combine(
+            target_date,
+            dt.time(10, 30),
+            tzinfo=SGT,
+        )
+
+    return earliest, latest
+
+
+def message_for_send_time(
+    message,
+    campaign,
+    target_date,
+    now,
+):
+    """Keep delayed lunch notifications truthful after midnight."""
+    if (
+        campaign == "lunch"
+        and target_date == now.date()
+    ):
+        return message.replace(
+            "lunchtime tomorrow",
+            "lunchtime today",
+        )
+
+    return message
+
+
 def decision_cutoff(
     campaign,
     target_date,
@@ -1656,6 +1706,7 @@ def send_campaign_comms(
     dry_run=False,
     now=None,
     target_date=None,
+    enforce_send_window=False,
 ):
     now = (
         now
@@ -1663,6 +1714,28 @@ def send_campaign_comms(
             SGT
         )
     )
+
+    target_date = (
+        target_date
+        or target_date_for(
+            campaign,
+            now,
+        )
+    )
+
+    if enforce_send_window:
+        earliest, latest = useful_send_window(
+            campaign,
+            target_date,
+        )
+        if not earliest <= now <= latest:
+            print(
+                f"{campaign} {target_date}: scheduled job reached notification "
+                f"step at {now:%Y-%m-%d %H:%M %Z}, outside its useful send "
+                f"window ({earliest:%Y-%m-%d %H:%M} to "
+                f"{latest:%Y-%m-%d %H:%M} SGT); nothing sent"
+            )
+            return "outside_send_window"
 
     token = os.getenv(
         "TELEGRAM_BOT_TOKEN"
@@ -1684,14 +1757,6 @@ def send_campaign_comms(
             "and TELEGRAM_CHAT_ID "
             "are required"
         )
-
-    target_date = (
-        target_date
-        or target_date_for(
-            campaign,
-            now,
-        )
-    )
 
     selected = (
         select_latest_campaign_row(
@@ -1717,6 +1782,13 @@ def send_campaign_comms(
             "",
         )
     ).strip()
+
+    message = message_for_send_time(
+        message,
+        campaign,
+        target_date,
+        now,
+    )
 
     if not message:
         print(
@@ -1868,6 +1940,15 @@ def main():
         action="store_true",
     )
 
+    parser.add_argument(
+        "--enforce-send-window",
+        action="store_true",
+        help=(
+            "Skip Telegram if a scheduled job is delayed beyond the approved "
+            "lunch/dinner send window"
+        ),
+    )
+
     args = (
         parser.parse_args()
     )
@@ -1946,6 +2027,9 @@ def main():
             ),
             target_date=(
                 args.target_date
+            ),
+            enforce_send_window=(
+                args.enforce_send_window
             ),
         )
 
