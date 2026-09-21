@@ -871,7 +871,9 @@ if __name__ == "__main__":
     # open sheet
     sh = open_sheet_by_id(SHEET_ID)
 
-    run_24h_forecast(sh)
+    # forecast_24h is owned by forecast_24h_holder.py and its dedicated
+    # workflow. Writing the legacy row-per-region schema here would cause
+    # ensure_worksheet() to clear the newer wide-format forecast_24h tab.
     # run_2h_forecast(sh)
 
     _, rainfall_area = run_rainfall(sh)
