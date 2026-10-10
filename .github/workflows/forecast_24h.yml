@@ -1,15 +1,6 @@
 name: Refresh 24-hour forecast holder
 
 on:
-  schedule:
-    # 8:45 PM SGT - Next-day lunch AND dinner forecast
-    - cron: "45 20 * * *"
-      timezone: "Asia/Singapore"
-
-    # 8:45 AM SGT - Same-day dinner forecast
-    - cron: "45 8 * * *"
-      timezone: "Asia/Singapore"
-
   workflow_dispatch:
     inputs:
       campaign:
@@ -20,6 +11,11 @@ on:
         options:
           - lunch
           - dinner
+          - both
+      target_date:
+        description: Campaign date in SGT (YYYY-MM-DD); Cloudflare supplies this
+        required: false
+        type: string
       send_live:
         description: Send live instead of performing a dry run
         required: true
@@ -76,42 +72,19 @@ jobs:
 
       - name: Refresh forecast_24h and notify Telegram
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SCHEDULE: ${{ github.event.schedule }}
           MANUAL_CAMPAIGN: ${{ inputs.campaign }}
+          MANUAL_TARGET_DATE: ${{ inputs.target_date }}
           MANUAL_SEND_LIVE: ${{ inputs.send_live }}
         run: |
-          case "$EVENT_NAME" in
-            workflow_dispatch)
-              # GitHub can expose an empty input when an older workflow run is
-              # re-run. Default to lunch instead of passing --campaign "".
-              campaign="${MANUAL_CAMPAIGN:-lunch}"
-              ;;
-            schedule)
-              case "$EVENT_SCHEDULE" in
-                "45 20 * * *") campaign="both" ;;
-                "45 8 * * *") campaign="dinner" ;;
-                *)
-                  echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
-                  exit 1
-                  ;;
-              esac
-              ;;
-            *)
-              echo "Unsupported GitHub event: '$EVENT_NAME'"
-              exit 1
-              ;;
-          esac
-
-          echo "Event: $EVENT_NAME; schedule: ${EVENT_SCHEDULE:-none}; campaign: $campaign"
-
+          campaign="${MANUAL_CAMPAIGN:-lunch}"
           args=(--campaign "$campaign")
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            args+=(--enforce-send-window)
+          if [ -n "$MANUAL_TARGET_DATE" ]; then
+            args+=(--target-date "$MANUAL_TARGET_DATE")
           fi
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_SEND_LIVE" != "true" ]; then
+          if [ "$MANUAL_SEND_LIVE" != "true" ]; then
             args+=(--dry-run)
           fi
+          echo "Campaign: $campaign; target date: ${MANUAL_TARGET_DATE:-auto}; live: $MANUAL_SEND_LIVE"
           python forecast_24h_holder.py --notify "${args[@]}"
 
       - name: Cleanup credentials
