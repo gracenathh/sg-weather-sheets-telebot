@@ -2,7 +2,7 @@ name: Refresh 24-hour forecast holder
 
 on:
   schedule:
-    # 8:45 PM SGT - Next-day lunch forecast
+    # 8:45 PM SGT - Next-day lunch AND dinner forecast
     - cron: "45 20 * * *"
       timezone: "Asia/Singapore"
 
@@ -89,8 +89,8 @@ jobs:
               ;;
             schedule)
               case "$EVENT_SCHEDULE" in
-                "45 12 * * *") campaign="lunch" ;;
-                "45 0 * * *") campaign="dinner" ;;
+                "45 20 * * *") campaign="both" ;;
+                "45 8 * * *") campaign="dinner" ;;
                 *)
                   echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
                   exit 1
