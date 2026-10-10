@@ -947,234 +947,33 @@ def deduplicate(rows):
 # ============================================================
 
 
-def keep_only_cutoff_communications(
-    rows,
-):
+def keep_only_cutoff_communications(rows):
+    """Display comms for latest forecast vintage per target day in the worksheet.
+
+    Sending separately checks the live latest API payload; worksheet history is
+    informational, not the source of the sending decision.
     """
-    Populate campaign_comms only on the latest forecast
-    available at each campaign cutoff.
-    """
-
-    comms_idx = HEADERS.index(
-        "campaign_comms"
-    )
-
-    window_idx = HEADERS.index(
-        "forecast_window"
-    )
-
-    start_idx = HEADERS.index(
-        "period_start"
-    )
-
-    issued_idx = HEADERS.index(
-        "issued_ts"
-    )
-
-    updated_idx = HEADERS.index(
-        "updated_ts"
-    )
-
-    result = [
-        list(row)
-        for row in rows
-    ]
-
+    result = [list(row) for row in rows]
+    idx = HEADERS.index("campaign_comms")
     for row in result:
-        row[comms_idx] = ""
+        row[idx] = ""
 
-    candidates = {}
+    dates = set()
+    for row in rows:
+        start = parse_datetime(row[HEADERS.index("period_start")])
+        if start:
+            dates.add(start.date())
 
-    rows_by_issue_period = {}
-
-    for index, row in enumerate(
-        rows
-    ):
-        window = (
-            row[window_idx]
-        )
-
-        period_start = (
-            parse_datetime(
-                row[start_idx]
-            )
-        )
-
-        available = (
-            parse_datetime(
-                row[updated_idx]
-            )
-            or parse_datetime(
-                row[issued_idx]
-            )
-        )
-
-        if (
-            not period_start
-            or not available
-        ):
-            continue
-
-        target_date = (
-            period_start.date()
-        )
-
-        rows_by_issue_period[
-            (
-                row[issued_idx],
-                target_date,
-                window,
-            )
-        ] = row
-
-        if (
-            window
-            == "12:00-18:00"
-        ):
-            kind = "lunch"
-
-            cutoff = (
-                dt.datetime.combine(
-                    (
-                        target_date
-                        - dt.timedelta(
-                            days=1
-                        )
-                    ),
-                    dt.time(
-                        21,
-                        0,
-                    ),
-                    SGT,
-                )
-            )
-
-        elif (
-            window
-            == "18:00-00:00"
-        ):
-            kind = "dinner"
-
-            cutoff = (
-                dt.datetime.combine(
-                    target_date,
-                    dt.time(
-                        8,
-                        30,
-                    ),
-                    SGT,
-                )
-            )
-
-        else:
-            continue
-
-        if available > cutoff:
-            continue
-
-        key = (
-            target_date,
-            kind,
-        )
-
-        current = (
-            candidates.get(
-                key
-            )
-        )
-
-        if (
-            current is None
-            or available
-            > current[0]
-        ):
-            candidates[key] = (
-                available,
-                index,
-            )
-
-    thunder_idx = HEADERS.index(
-        "thunder_regions"
-    )
-
-    for (
-        target_date,
-        kind,
-    ), (
-        _,
-        index,
-    ) in candidates.items():
-
-        selected = (
-            rows[index]
-        )
-
-        if kind == "lunch":
-            morning = (
-                rows_by_issue_period.get(
-                    (
-                        selected[
-                            issued_idx
-                        ],
-                        target_date,
-                        "06:00-12:00",
-                    )
-                )
-            )
-
-            morning_regions = set(
-                str(
-                    morning[
-                        thunder_idx
-                    ]
-                    if morning
-                    else ""
-                ).split("|")
-            )
-
-            afternoon_regions = set(
-                str(
-                    selected[
-                        thunder_idx
-                    ]
-                ).split("|")
-            )
-
-            regions = [
-                region
-                for region in REGIONS
-                if (
-                    region
-                    in morning_regions
-                    and region
-                    in afternoon_regions
-                )
-            ]
-
-        else:
-            selected_regions = set(
-                str(
-                    selected[
-                        thunder_idx
-                    ]
-                ).split("|")
-            )
-
-            regions = [
-                region
-                for region in REGIONS
-                if region
-                in selected_regions
-            ]
-
-        result[index][
-            comms_idx
-        ] = communication_messages(
-            kind,
-            regions,
-            target_date,
-        )
-
+    for date in dates:
+        for campaign in ("lunch", "dinner"):
+            chosen = select_latest_campaign_row(rows, campaign, date)
+            if not chosen:
+                continue
+            key = (chosen["issued_ts"], chosen["period_start"])
+            for row in result:
+                if (row[HEADERS.index("issued_ts")], row[HEADERS.index("period_start")]) == key:
+                    row[idx] = build_campaign_message(rows, campaign, date, chosen)
+                    break
     return result
 
 
@@ -1490,35 +1289,25 @@ def target_date_for(
     )
 
 
-def useful_send_window(
-    campaign,
-    target_date,
-):
-    """Return the SGT interval in which an alert is still useful."""
-    if campaign == "lunch":
-        earliest = dt.datetime.combine(
-            target_date - dt.timedelta(days=1),
-            dt.time(20, 30),
-            tzinfo=SGT,
-        )
-        latest = dt.datetime.combine(
-            target_date,
-            dt.time(11, 0),
-            tzinfo=SGT,
-        )
-    else:
-        earliest = dt.datetime.combine(
-            target_date,
-            dt.time(8, 30),
-            tzinfo=SGT,
-        )
-        latest = dt.datetime.combine(
-            target_date,
-            dt.time(10, 30),
-            tzinfo=SGT,
-        )
+def useful_send_window(campaign, target_date, now=None):
+    """Allowed windows for scheduled sends in Singapore time.
 
-    return earliest, latest
+    Night run can notify tomorrow's lunch AND dinner; morning run can notify
+    today's dinner if not already sent on the preceding night.
+    """
+    previous_night_start = dt.datetime.combine(
+        target_date - dt.timedelta(days=1), dt.time(20, 30), SGT
+    )
+    previous_night_end = dt.datetime.combine(
+        target_date - dt.timedelta(days=1), dt.time(23, 59, 59), SGT
+    )
+    if campaign == "lunch":
+        return previous_night_start, previous_night_end
+    today_morning_start = dt.datetime.combine(target_date, dt.time(8, 30), SGT)
+    today_morning_end = dt.datetime.combine(target_date, dt.time(10, 30), SGT)
+    if now and previous_night_start <= now <= previous_night_end:
+        return previous_night_start, previous_night_end
+    return today_morning_start, today_morning_end
 
 
 def message_for_send_time(
@@ -1537,122 +1326,54 @@ def message_for_send_time(
             "lunchtime today",
         )
 
+    if campaign == "dinner" and target_date > now.date():
+        return message.replace("heavy rain tonight", "heavy rain tomorrow evening")
     return message
 
 
-def decision_cutoff(
-    campaign,
-    target_date,
-):
-    if campaign == "lunch":
-        return dt.datetime.combine(
-            (
-                target_date
-                - dt.timedelta(
-                    days=1
-                )
-            ),
-            dt.time(
-                21,
-                0,
-            ),
-            SGT,
-        )
-
-    return dt.datetime.combine(
-        target_date,
-        dt.time(
-            8,
-            30,
-        ),
-        SGT,
-    )
+def latest_forecast_vintage(rows):
+    """Select one coherent latest NEA issuance; do not combine vintages."""
+    issues = [parse_datetime(row[HEADERS.index("issued_ts")]) for row in rows]
+    newest = max((item for item in issues if item), default=None)
+    if newest is None:
+        return []
+    return [row for row in rows if parse_datetime(row[HEADERS.index("issued_ts")]) == newest]
 
 
-def select_latest_campaign_row(
-    rows,
-    campaign,
-    target_date,
-):
-    expected_use = (
-        "lunch_block_2"
-        if campaign == "lunch"
-        else "dinner"
-    )
+def select_latest_campaign_row(rows, campaign, target_date):
+    """Select target period from the latest issuance, with NO time cutoff."""
+    vintage = latest_forecast_vintage(rows)
+    window = "12:00-18:00" if campaign == "lunch" else "18:00-00:00"
+    matching = []
+    for row in vintage:
+        record = dict(zip(HEADERS, row))
+        start = parse_datetime(record.get("period_start"))
+        if start and start.date() == target_date and record.get("forecast_window") == window:
+            matching.append(record)
+    return max(matching, key=lambda r: parse_datetime(r.get("updated_ts")) or
+               parse_datetime(r.get("issued_ts")), default=None)
 
-    cutoff = decision_cutoff(
-        campaign,
-        target_date,
-    )
 
-    candidates = []
-
-    for row in rows:
-        record = dict(
-            zip(
-                HEADERS,
-                row,
-            )
-        )
-
-        if (
-            str(
-                record.get(
-                    "campaign_use",
-                    "",
-                )
-            ).strip()
-            != expected_use
-        ):
-            continue
-
-        period_start = (
-            parse_datetime(
-                record.get(
-                    "period_start"
-                )
-            )
-        )
-
-        available = (
-            parse_datetime(
-                record.get(
-                    "updated_ts"
-                )
-            )
-            or parse_datetime(
-                record.get(
-                    "issued_ts"
-                )
-            )
-        )
-
-        if (
-            not period_start
-            or not available
-        ):
-            continue
-
-        if (
-            period_start.date()
-            == target_date
-            and available
-            <= cutoff
-        ):
-            candidates.append(
-                (
-                    available,
-                    record,
-                )
-            )
-
-    if not candidates:
-        return None
-
-    return max(
-        candidates,
-        key=lambda item: item[0],
-    )[1]
+def build_campaign_message(rows, campaign, target_date, selected):
+    """Build the text from raw regional thunder values, not sheet comms cells."""
+    if selected is None:
+        return ""
+    afternoon_or_evening = set(str(selected.get("thunder_regions") or "").split("|"))
+    if campaign == "dinner":
+        regions = [r for r in REGIONS if r in afternoon_or_evening]
+    else:
+        vintage = latest_forecast_vintage(rows)
+        morning = None
+        for row in vintage:
+            record = dict(zip(HEADERS, row))
+            start = parse_datetime(record.get("period_start"))
+            if (start and start.date() == target_date and
+                    record.get("forecast_window") == "06:00-12:00"):
+                morning = record
+                break
+        morning_regions = set(str((morning or {}).get("thunder_regions") or "").split("|"))
+        regions = [r for r in REGIONS if r in morning_regions and r in afternoon_or_evening]
+    return communication_messages(campaign, regions, target_date)
 
 
 # ============================================================
@@ -1727,6 +1448,7 @@ def send_campaign_comms(
         earliest, latest = useful_send_window(
             campaign,
             target_date,
+            now,
         )
         if not earliest <= now <= latest:
             print(
@@ -1776,12 +1498,10 @@ def send_campaign_comms(
 
         return "no_forecast"
 
-    message = str(
-        selected.get(
-            "campaign_comms",
-            "",
-        )
-    ).strip()
+    message = build_campaign_message(rows, campaign, target_date, selected).strip()
+    print(f"{campaign} {target_date}: latest vintage={selected.get('issued_ts')}, "
+          f"updated={selected.get('updated_ts')}, thunder={selected.get('thunder_regions')!r}, "
+          f"message_eligible={bool(message)}")
 
     message = message_for_send_time(
         message,
@@ -1912,6 +1632,7 @@ def main():
         choices=(
             "lunch",
             "dinner",
+            "both",
         ),
     )
 
@@ -2018,20 +1739,29 @@ def main():
         )
 
     if args.notify:
-        send_campaign_comms(
-            sh,
-            rows,
-            args.campaign,
-            dry_run=(
-                args.dry_run
-            ),
-            target_date=(
-                args.target_date
-            ),
-            enforce_send_window=(
-                args.enforce_send_window
-            ),
-        )
+        # ALWAYS use the latest live NEA issuance for notification decisions,
+        # even when refreshing the historical worksheet or using --skip-refresh.
+        live_rows = flatten_payload(fetch_latest())
+        vintage_rows = latest_forecast_vintage(live_rows)
+        if not vintage_rows:
+            raise RuntimeError("NEA latest endpoint returned no usable forecast vintage")
+        print(f"Notification: fetched latest NEA issuance "
+              f"{vintage_rows[0][HEADERS.index('issued_ts')]} with "
+              f"{len(vintage_rows)} forecast periods")
+        now = dt.datetime.now(SGT)
+        campaigns = ("lunch", "dinner") if args.campaign == "both" else (args.campaign,)
+        for campaign in campaigns:
+            if args.target_date:
+                date = args.target_date
+            elif args.campaign == "both":
+                date = now.date() + dt.timedelta(days=1)
+            else:
+                date = target_date_for(campaign, now)
+            send_campaign_comms(
+                sh, vintage_rows, campaign,
+                dry_run=args.dry_run, now=now, target_date=date,
+                enforce_send_window=args.enforce_send_window,
+            )
 
 
 if __name__ == "__main__":
