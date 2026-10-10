@@ -1,0 +1,92 @@
+name: Refresh 24-hour forecast holder
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign:
+        description: Campaign to preview or send
+        required: true
+        default: lunch
+        type: choice
+        options:
+          - lunch
+          - dinner
+          - both
+      target_date:
+        description: Campaign date in SGT (YYYY-MM-DD); Cloudflare supplies this
+        required: false
+        type: string
+      send_live:
+        description: Send live instead of performing a dry run
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forecast-24h-holder
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
+      GOOGLE_APPLICATION_CREDENTIALS: ${{ github.workspace }}/sa.json
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service account JSON
+        env:
+          SA_JSON: ${{ secrets.SA_JSON }}
+        run: |
+          test -n "$SA_JSON"
+          printf '%s' "$SA_JSON" > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      - name: Sanity check JSON
+        run: |
+          python - <<'PY'
+          import json, os
+          path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+          with open(path, encoding="utf-8") as handle:
+              json.load(handle)
+          print("Service account JSON OK at:", path)
+          PY
+
+      - name: Refresh forecast_24h and notify Telegram
+        env:
+          MANUAL_CAMPAIGN: ${{ inputs.campaign }}
+          MANUAL_TARGET_DATE: ${{ inputs.target_date }}
+          MANUAL_SEND_LIVE: ${{ inputs.send_live }}
+        run: |
+          campaign="${MANUAL_CAMPAIGN:-lunch}"
+          args=(--campaign "$campaign")
+          if [ -n "$MANUAL_TARGET_DATE" ]; then
+            args+=(--target-date "$MANUAL_TARGET_DATE")
+          fi
+          if [ "$MANUAL_SEND_LIVE" != "true" ]; then
+            args+=(--dry-run)
+          fi
+          echo "Campaign: $campaign; target date: ${MANUAL_TARGET_DATE:-auto}; live: $MANUAL_SEND_LIVE"
+          python forecast_24h_holder.py --notify "${args[@]}"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
