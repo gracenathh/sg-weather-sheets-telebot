@@ -2,12 +2,14 @@ name: Refresh 24-hour forecast holder
 
 on:
   schedule:
-    # GitHub cron is UTC. Singapore is UTC+8 year-round.
-    # Use :45 to avoid GitHub Actions' busiest top-of-hour scheduling period.
-    # 12:45 UTC = 20:45 SGT (target: around 21:00, next-day lunch)
-    # 00:45 UTC = 08:45 SGT (target: around 09:00, same-day dinner)
-    - cron: "45 12 * * *"
-    - cron: "45 0 * * *"
+    # 8:45 PM SGT - Next-day lunch forecast
+    - cron: "45 20 * * *"
+      timezone: "Asia/Singapore"
+
+    # 8:45 AM SGT - Same-day dinner forecast
+    - cron: "45 8 * * *"
+      timezone: "Asia/Singapore"
+
   workflow_dispatch:
     inputs:
       campaign:
