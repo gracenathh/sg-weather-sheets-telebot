@@ -1,4 +1,4 @@
-name: Refresh 24-hour forecast holder
+name: Refresh 24-hour forecast holder (CF)
 
 on:
   workflow_dispatch:
