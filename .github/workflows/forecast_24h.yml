@@ -3,11 +3,11 @@ name: Refresh 24-hour forecast holder
 on:
   schedule:
     # 8:45 PM SGT - Next-day lunch AND dinner forecast
-    - cron: "45 20 * * *"
+    - cron: "45 15 * * *"
       timezone: "Asia/Singapore"
 
     # 8:45 AM SGT - Same-day dinner forecast
-    - cron: "45 8 * * *"
+    - cron: "45 1 * * *"
       timezone: "Asia/Singapore"
 
   workflow_dispatch:
