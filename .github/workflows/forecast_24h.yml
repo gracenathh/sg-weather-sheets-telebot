@@ -1,6 +1,13 @@
+
 name: Refresh 24-hour forecast holder
 
 on:
+  # Cloudflare Worker trigger
+  repository_dispatch:
+    types:
+      - trigger-24h-weather
+
+  # Existing GitHub schedules for Telegram notifications
   schedule:
     # 8:45 PM SGT - Next-day lunch AND dinner forecast
     - cron: "45 20 * * *"
@@ -10,6 +17,7 @@ on:
     - cron: "45 8 * * *"
       timezone: "Asia/Singapore"
 
+  # Manual execution from GitHub Actions
   workflow_dispatch:
     inputs:
       campaign:
@@ -21,11 +29,13 @@ on:
           - lunch
           - dinner
           - both
+
       target_date:
         description: "Optional campaign date (YYYY-MM-DD, Singapore time); blank = automatic"
         required: false
         default: ""
         type: string
+
       send_live:
         description: Send live instead of performing a dry run
         required: true
@@ -43,6 +53,7 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     env:
       SHEET_ID: ${{ secrets.SHEET_ID }}
       DATA_GOV_SG_API_KEY: ${{ secrets.DATA_GOV_SG_API_KEY }}
@@ -73,61 +84,100 @@ jobs:
       - name: Sanity check JSON
         run: |
           python - <<'PY'
-          import json, os
+          import json
+          import os
+
           path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+
           with open(path, encoding="utf-8") as handle:
               json.load(handle)
+
           print("Service account JSON OK at:", path)
           PY
 
+      # ------------------------------------------------------
+      # CLOUDFLARE TRIGGER
+      # Refresh Google Sheets only.
+      # No Telegram messages.
+      # ------------------------------------------------------
+      - name: Refresh 24H forecast from Cloudflare
+        if: github.event_name == 'repository_dispatch'
+        run: |
+          echo "Cloudflare triggered 24H forecast refresh"
+          python forecast_24h_holder.py
+
+      # ------------------------------------------------------
+      # GITHUB SCHEDULE / MANUAL TRIGGER
+      # Keep existing Telegram notification behavior.
+      # ------------------------------------------------------
       - name: Refresh forecast_24h and notify Telegram
+        if: github.event_name != 'repository_dispatch'
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
           MANUAL_CAMPAIGN: ${{ inputs.campaign }}
           MANUAL_SEND_LIVE: ${{ inputs.send_live }}
           MANUAL_TARGET_DATE: ${{ inputs.target_date }}
+
         run: |
           case "$EVENT_NAME" in
             workflow_dispatch)
-              # GitHub can expose an empty input when an older workflow run is
-              # re-run. Default to lunch instead of passing --campaign "".
+              # Default to lunch if input is empty
               campaign="${MANUAL_CAMPAIGN:-lunch}"
               ;;
+
             schedule)
               case "$EVENT_SCHEDULE" in
-                "45 20 * * *") campaign="both" ;;
-                "45 8 * * *") campaign="dinner" ;;
+                "45 20 * * *")
+                  campaign="both"
+                  ;;
+                "45 8 * * *")
+                  campaign="dinner"
+                  ;;
                 *)
                   echo "Unknown scheduled cron: '$EVENT_SCHEDULE'"
                   exit 1
                   ;;
               esac
               ;;
+
             *)
               echo "Unsupported GitHub event: '$EVENT_NAME'"
               exit 1
               ;;
           esac
 
-          echo "Event: $EVENT_NAME; schedule: ${EVENT_SCHEDULE:-none}; campaign: $campaign"
+          echo "Event: $EVENT_NAME"
+          echo "Schedule: ${EVENT_SCHEDULE:-none}"
+          echo "Campaign: $campaign"
 
           args=(--campaign "$campaign")
+
+          # Optional manual target date
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$MANUAL_TARGET_DATE" ]; then
             if ! [[ "$MANUAL_TARGET_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-              echo "Invalid target_date. Use YYYY-MM-DD (example: 2026-10-11)."
+              echo "Invalid target_date. Use YYYY-MM-DD."
               exit 1
             fi
+
             args+=(--target-date "$MANUAL_TARGET_DATE")
           fi
+
+          # Enforce notification window for scheduled runs
           if [ "$EVENT_NAME" = "schedule" ]; then
             args+=(--enforce-send-window)
           fi
+
+          # Manual runs default to dry run
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_SEND_LIVE" != "true" ]; then
             args+=(--dry-run)
           fi
+
           python forecast_24h_holder.py --notify "${args[@]}"
 
+      # ------------------------------------------------------
+      # CLEANUP
+      # ------------------------------------------------------
       - name: Cleanup credentials
         if: always()
         run: rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
